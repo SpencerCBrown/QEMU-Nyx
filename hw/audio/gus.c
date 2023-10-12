@@ -33,6 +33,7 @@
 #include "migration/vmstate.h"
 #include "gusemu.h"
 #include "gustate.h"
+#include "qom/object.h"
 
 #define dolog(...) AUD_log ("audio", __VA_ARGS__)
 #ifdef DEBUG
@@ -41,16 +42,10 @@
 #define ldebug(...)
 #endif
 
-#ifdef HOST_WORDS_BIGENDIAN
-#define GUS_ENDIANNESS 1
-#else
-#define GUS_ENDIANNESS 0
-#endif
-
 #define TYPE_GUS "gus"
-#define GUS(obj) OBJECT_CHECK (GUSState, (obj), TYPE_GUS)
+OBJECT_DECLARE_SIMPLE_TYPE(GUSState, GUS)
 
-typedef struct GUSState {
+struct GUSState {
     ISADevice dev;
     GUSEmuState emu;
     QEMUSoundCard card;
@@ -66,7 +61,7 @@ typedef struct GUSState {
     IsaDma *isa_dma;
     PortioList portio_list1;
     PortioList portio_list2;
-} GUSState;
+};
 
 static uint32_t gus_readb(void *opaque, uint32_t nport)
 {
@@ -241,11 +236,12 @@ static const MemoryRegionPortio gus_portio_list2[] = {
 static void gus_realizefn (DeviceState *dev, Error **errp)
 {
     ISADevice *d = ISA_DEVICE(dev);
+    ISABus *bus = isa_bus_from_device(d);
     GUSState *s = GUS (dev);
     IsaDmaClass *k;
     struct audsettings as;
 
-    s->isa_dma = isa_get_dma(isa_bus_from_device(d), s->emu.gusdma);
+    s->isa_dma = isa_bus_get_dma(bus, s->emu.gusdma);
     if (!s->isa_dma) {
         error_setg(errp, "ISA controller does not support DMA");
         return;
@@ -256,7 +252,7 @@ static void gus_realizefn (DeviceState *dev, Error **errp)
     as.freq = s->freq;
     as.nchannels = 2;
     as.fmt = AUDIO_FORMAT_S16;
-    as.endianness = GUS_ENDIANNESS;
+    as.endianness = AUDIO_HOST_ENDIANNESS;
 
     s->voice = AUD_open_out (
         &s->card,
@@ -287,15 +283,9 @@ static void gus_realizefn (DeviceState *dev, Error **errp)
     s->emu.himemaddr = s->himem;
     s->emu.gusdatapos = s->emu.himemaddr + 1024 * 1024 + 32;
     s->emu.opaque = s;
-    isa_init_irq (d, &s->pic, s->emu.gusirq);
+    s->pic = isa_bus_get_irq(bus, s->emu.gusirq);
 
     AUD_set_active_out (s->voice, 1);
-}
-
-static int GUS_init (ISABus *bus)
-{
-    isa_create_simple (bus, TYPE_GUS);
-    return 0;
 }
 
 static Property gus_properties[] = {
@@ -315,7 +305,7 @@ static void gus_class_initfn (ObjectClass *klass, void *data)
     set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
     dc->desc = "Gravis Ultrasound GF1";
     dc->vmsd = &vmstate_gus;
-    dc->props = gus_properties;
+    device_class_set_props(dc, gus_properties);
 }
 
 static const TypeInfo gus_info = {
@@ -328,7 +318,7 @@ static const TypeInfo gus_info = {
 static void gus_register_types (void)
 {
     type_register_static (&gus_info);
-    isa_register_soundhw("gus", "Gravis Ultrasound GF1", GUS_init);
+    deprecated_register_soundhw("gus", "Gravis Ultrasound GF1", 1, TYPE_GUS);
 }
 
 type_init (gus_register_types)

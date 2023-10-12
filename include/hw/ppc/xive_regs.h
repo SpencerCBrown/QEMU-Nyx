@@ -48,6 +48,22 @@
 
 #define TM_SHIFT                16
 
+/*
+ * TIMA addresses are 12-bits (4k page).
+ * The MSB indicates a special op with side effect, which can be
+ * refined with bit 10 (see below).
+ * The registers, logically grouped in 4 rings (a quad-word each), are
+ * defined on the 6 LSBs (offset below 0x40)
+ * In between, we can add a cache line index from 0...3 (ie, 0, 0x80,
+ * 0x100, 0x180) to select a specific snooper. Those 'snoop port
+ * address' bits should be dropped when processing the operations as
+ * they are all equivalent.
+ */
+#define TM_ADDRESS_MASK         0xC3F
+#define TM_SPECIAL_OP           0x800
+#define TM_RING_OFFSET          0x30
+#define TM_REG_OFFSET           0x3F
+
 /* TM register offsets */
 #define TM_QW0_USER             0x000 /* All rings */
 #define TM_QW1_OS               0x010 /* Ring 0..2 */
@@ -71,7 +87,7 @@
  * QW word 2 contains the valid bit at the top and other fields
  * depending on the QW.
  */
-#define TM_WORD2                0x8
+#define   TM_WORD2              0x8
 #define   TM_QW0W2_VU           PPC_BIT32(0)
 #define   TM_QW0W2_LOGIC_SERV   PPC_BITMASK32(1, 31) /* XX 2,31 ? */
 #define   TM_QW1W2_VO           PPC_BIT32(0)
@@ -236,6 +252,8 @@ typedef struct XiveEND {
     (be32_to_cpu((end)->w0) & END_W0_UNCOND_ESCALATE)
 #define xive_end_is_silent_escalation(end)              \
     (be32_to_cpu((end)->w0) & END_W0_SILENT_ESCALATE)
+#define xive_end_is_firmware(end)              \
+    (be32_to_cpu((end)->w0) & END_W0_FIRMWARE)
 
 static inline uint64_t xive_end_qaddr(XiveEND *end)
 {
@@ -252,9 +270,12 @@ typedef struct XiveNVT {
         uint32_t        w0;
 #define NVT_W0_VALID             PPC_BIT32(0)
         uint32_t        w1;
+#define NVT_W1_EQ_BLOCK          PPC_BITMASK32(0, 3)
+#define NVT_W1_EQ_INDEX          PPC_BITMASK32(4, 31)
         uint32_t        w2;
         uint32_t        w3;
         uint32_t        w4;
+#define NVT_W4_IPB               PPC_BITMASK32(16, 23)
         uint32_t        w5;
         uint32_t        w6;
         uint32_t        w7;
@@ -270,5 +291,27 @@ typedef struct XiveNVT {
 } XiveNVT;
 
 #define xive_nvt_is_valid(nvt)    (be32_to_cpu((nvt)->w0) & NVT_W0_VALID)
+
+/*
+ * The VP number space in a block is defined by the END_W6_NVT_INDEX
+ * field of the XIVE END
+ */
+#define XIVE_NVT_SHIFT                19
+#define XIVE_NVT_COUNT                (1 << XIVE_NVT_SHIFT)
+
+static inline uint32_t xive_nvt_cam_line(uint8_t nvt_blk, uint32_t nvt_idx)
+{
+    return (nvt_blk << XIVE_NVT_SHIFT) | nvt_idx;
+}
+
+static inline uint32_t xive_nvt_idx(uint32_t cam_line)
+{
+    return cam_line & ((1 << XIVE_NVT_SHIFT) - 1);
+}
+
+static inline uint32_t xive_nvt_blk(uint32_t cam_line)
+{
+    return (cam_line >> XIVE_NVT_SHIFT) & 0xf;
+}
 
 #endif /* PPC_XIVE_REGS_H */

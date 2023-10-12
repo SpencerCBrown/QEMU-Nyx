@@ -20,23 +20,23 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "qemu/timer.h"
 #include "hw/i2c/i2c.h"
 #include "hw/irq.h"
 #include "migration/qemu-file-types.h"
 #include "migration/vmstate.h"
 #include "sysemu/sysemu.h"
-#include "ui/console.h"
+#include "sysemu/rtc.h"
 #include "qemu/bcd.h"
 #include "qemu/module.h"
+#include "qom/object.h"
 
 #define VERBOSE 1
 
 #define TYPE_TWL92230 "twl92230"
-#define TWL92230(obj) OBJECT_CHECK(MenelausState, (obj), TYPE_TWL92230)
+OBJECT_DECLARE_SIMPLE_TYPE(MenelausState, TWL92230)
 
-typedef struct MenelausState {
+struct MenelausState {
     I2CSlave parent_obj;
 
     int firstbyte;
@@ -72,7 +72,7 @@ typedef struct MenelausState {
     uint16_t rtc_next_vmstate;
     qemu_irq out[4];
     uint8_t pwrbtn_state;
-} MenelausState;
+};
 
 static inline void menelaus_update(MenelausState *s)
 {
@@ -112,19 +112,19 @@ static void menelaus_rtc_hz(void *opaque)
     s->rtc.alm_sec --;
     s->rtc.next += 1000;
     timer_mod(s->rtc.hz_tm, s->rtc.next);
-    if ((s->rtc.ctrl >> 3) & 3) {				/* EVERY */
+    if ((s->rtc.ctrl >> 3) & 3) {               /* EVERY */
         menelaus_rtc_update(s);
         if (((s->rtc.ctrl >> 3) & 3) == 1 && !s->rtc.tm.tm_sec)
-            s->status |= 1 << 8;				/* RTCTMR */
+            s->status |= 1 << 8;                /* RTCTMR */
         else if (((s->rtc.ctrl >> 3) & 3) == 2 && !s->rtc.tm.tm_min)
-            s->status |= 1 << 8;				/* RTCTMR */
+            s->status |= 1 << 8;                /* RTCTMR */
         else if (!s->rtc.tm.tm_hour)
-            s->status |= 1 << 8;				/* RTCTMR */
+            s->status |= 1 << 8;                /* RTCTMR */
     } else
-        s->status |= 1 << 8;					/* RTCTMR */
-    if ((s->rtc.ctrl >> 1) & 1) {				/* RTC_AL_EN */
+        s->status |= 1 << 8;                    /* RTCTMR */
+    if ((s->rtc.ctrl >> 1) & 1) {               /* RTC_AL_EN */
         if (s->rtc.alm_sec == 0)
-            s->status |= 1 << 9;				/* RTCALM */
+            s->status |= 1 << 9;                /* RTCALM */
         /* TODO: wake-up */
     }
     if (s->rtc.next_comp <= 0) {
@@ -140,19 +140,19 @@ static void menelaus_reset(I2CSlave *i2c)
 
     s->reg = 0x00;
 
-    s->vcore[0] = 0x0c;	/* XXX: X-loader needs 0x8c? check!  */
+    s->vcore[0] = 0x0c; /* XXX: X-loader needs 0x8c? check!  */
     s->vcore[1] = 0x05;
     s->vcore[2] = 0x02;
     s->vcore[3] = 0x0c;
     s->vcore[4] = 0x03;
-    s->dcdc[0] = 0x33;	/* Depends on wiring */
+    s->dcdc[0] = 0x33;  /* Depends on wiring */
     s->dcdc[1] = 0x03;
     s->dcdc[2] = 0x00;
     s->ldo[0] = 0x95;
     s->ldo[1] = 0x7e;
     s->ldo[2] = 0x00;
-    s->ldo[3] = 0x00;	/* Depends on wiring */
-    s->ldo[4] = 0x03;	/* Depends on wiring */
+    s->ldo[3] = 0x00;   /* Depends on wiring */
+    s->ldo[4] = 0x03;   /* Depends on wiring */
     s->ldo[5] = 0x00;
     s->ldo[6] = 0x00;
     s->ldo[7] = 0x00;
@@ -203,111 +203,97 @@ static void menelaus_gpio_set(void *opaque, int line, int level)
     }
 
     if (!s->pwrbtn_state && level) {
-        s->status |= 1 << 11;					/* PSHBTN */
+        s->status |= 1 << 11;               /* PSHBTN */
         menelaus_update(s);
     }
     s->pwrbtn_state = level;
 }
 
-#define MENELAUS_REV		0x01
-#define MENELAUS_VCORE_CTRL1	0x02
-#define MENELAUS_VCORE_CTRL2	0x03
-#define MENELAUS_VCORE_CTRL3	0x04
-#define MENELAUS_VCORE_CTRL4	0x05
-#define MENELAUS_VCORE_CTRL5	0x06
-#define MENELAUS_DCDC_CTRL1	0x07
-#define MENELAUS_DCDC_CTRL2	0x08
-#define MENELAUS_DCDC_CTRL3	0x09
-#define MENELAUS_LDO_CTRL1	0x0a
-#define MENELAUS_LDO_CTRL2	0x0b
-#define MENELAUS_LDO_CTRL3	0x0c
-#define MENELAUS_LDO_CTRL4	0x0d
-#define MENELAUS_LDO_CTRL5	0x0e
-#define MENELAUS_LDO_CTRL6	0x0f
-#define MENELAUS_LDO_CTRL7	0x10
-#define MENELAUS_LDO_CTRL8	0x11
-#define MENELAUS_SLEEP_CTRL1	0x12
-#define MENELAUS_SLEEP_CTRL2	0x13
-#define MENELAUS_DEVICE_OFF	0x14
-#define MENELAUS_OSC_CTRL	0x15
-#define MENELAUS_DETECT_CTRL	0x16
-#define MENELAUS_INT_MASK1	0x17
-#define MENELAUS_INT_MASK2	0x18
-#define MENELAUS_INT_STATUS1	0x19
-#define MENELAUS_INT_STATUS2	0x1a
-#define MENELAUS_INT_ACK1	0x1b
-#define MENELAUS_INT_ACK2	0x1c
-#define MENELAUS_GPIO_CTRL	0x1d
-#define MENELAUS_GPIO_IN	0x1e
-#define MENELAUS_GPIO_OUT	0x1f
-#define MENELAUS_BBSMS		0x20
-#define MENELAUS_RTC_CTRL	0x21
-#define MENELAUS_RTC_UPDATE	0x22
-#define MENELAUS_RTC_SEC	0x23
-#define MENELAUS_RTC_MIN	0x24
-#define MENELAUS_RTC_HR		0x25
-#define MENELAUS_RTC_DAY	0x26
-#define MENELAUS_RTC_MON	0x27
-#define MENELAUS_RTC_YR		0x28
-#define MENELAUS_RTC_WKDAY	0x29
-#define MENELAUS_RTC_AL_SEC	0x2a
-#define MENELAUS_RTC_AL_MIN	0x2b
-#define MENELAUS_RTC_AL_HR	0x2c
-#define MENELAUS_RTC_AL_DAY	0x2d
-#define MENELAUS_RTC_AL_MON	0x2e
-#define MENELAUS_RTC_AL_YR	0x2f
-#define MENELAUS_RTC_COMP_MSB	0x30
-#define MENELAUS_RTC_COMP_LSB	0x31
-#define MENELAUS_S1_PULL_EN	0x32
-#define MENELAUS_S1_PULL_DIR	0x33
-#define MENELAUS_S2_PULL_EN	0x34
-#define MENELAUS_S2_PULL_DIR	0x35
-#define MENELAUS_MCT_CTRL1	0x36
-#define MENELAUS_MCT_CTRL2	0x37
-#define MENELAUS_MCT_CTRL3	0x38
-#define MENELAUS_MCT_PIN_ST	0x39
-#define MENELAUS_DEBOUNCE1	0x3a
+#define MENELAUS_REV            0x01
+#define MENELAUS_VCORE_CTRL1    0x02
+#define MENELAUS_VCORE_CTRL2    0x03
+#define MENELAUS_VCORE_CTRL3    0x04
+#define MENELAUS_VCORE_CTRL4    0x05
+#define MENELAUS_VCORE_CTRL5    0x06
+#define MENELAUS_DCDC_CTRL1     0x07
+#define MENELAUS_DCDC_CTRL2     0x08
+#define MENELAUS_DCDC_CTRL3     0x09
+#define MENELAUS_LDO_CTRL1      0x0a
+#define MENELAUS_LDO_CTRL2      0x0b
+#define MENELAUS_LDO_CTRL3      0x0c
+#define MENELAUS_LDO_CTRL4      0x0d
+#define MENELAUS_LDO_CTRL5      0x0e
+#define MENELAUS_LDO_CTRL6      0x0f
+#define MENELAUS_LDO_CTRL7      0x10
+#define MENELAUS_LDO_CTRL8      0x11
+#define MENELAUS_SLEEP_CTRL1    0x12
+#define MENELAUS_SLEEP_CTRL2    0x13
+#define MENELAUS_DEVICE_OFF     0x14
+#define MENELAUS_OSC_CTRL       0x15
+#define MENELAUS_DETECT_CTRL    0x16
+#define MENELAUS_INT_MASK1      0x17
+#define MENELAUS_INT_MASK2      0x18
+#define MENELAUS_INT_STATUS1    0x19
+#define MENELAUS_INT_STATUS2    0x1a
+#define MENELAUS_INT_ACK1       0x1b
+#define MENELAUS_INT_ACK2       0x1c
+#define MENELAUS_GPIO_CTRL      0x1d
+#define MENELAUS_GPIO_IN        0x1e
+#define MENELAUS_GPIO_OUT       0x1f
+#define MENELAUS_BBSMS          0x20
+#define MENELAUS_RTC_CTRL       0x21
+#define MENELAUS_RTC_UPDATE     0x22
+#define MENELAUS_RTC_SEC        0x23
+#define MENELAUS_RTC_MIN        0x24
+#define MENELAUS_RTC_HR         0x25
+#define MENELAUS_RTC_DAY        0x26
+#define MENELAUS_RTC_MON        0x27
+#define MENELAUS_RTC_YR         0x28
+#define MENELAUS_RTC_WKDAY      0x29
+#define MENELAUS_RTC_AL_SEC     0x2a
+#define MENELAUS_RTC_AL_MIN     0x2b
+#define MENELAUS_RTC_AL_HR      0x2c
+#define MENELAUS_RTC_AL_DAY     0x2d
+#define MENELAUS_RTC_AL_MON     0x2e
+#define MENELAUS_RTC_AL_YR      0x2f
+#define MENELAUS_RTC_COMP_MSB   0x30
+#define MENELAUS_RTC_COMP_LSB   0x31
+#define MENELAUS_S1_PULL_EN     0x32
+#define MENELAUS_S1_PULL_DIR    0x33
+#define MENELAUS_S2_PULL_EN     0x34
+#define MENELAUS_S2_PULL_DIR    0x35
+#define MENELAUS_MCT_CTRL1      0x36
+#define MENELAUS_MCT_CTRL2      0x37
+#define MENELAUS_MCT_CTRL3      0x38
+#define MENELAUS_MCT_PIN_ST     0x39
+#define MENELAUS_DEBOUNCE1      0x3a
 
 static uint8_t menelaus_read(void *opaque, uint8_t addr)
 {
     MenelausState *s = (MenelausState *) opaque;
-    int reg = 0;
 
     switch (addr) {
     case MENELAUS_REV:
         return 0x22;
 
-    case MENELAUS_VCORE_CTRL5: reg ++;
-    case MENELAUS_VCORE_CTRL4: reg ++;
-    case MENELAUS_VCORE_CTRL3: reg ++;
-    case MENELAUS_VCORE_CTRL2: reg ++;
-    case MENELAUS_VCORE_CTRL1:
-        return s->vcore[reg];
+    case MENELAUS_VCORE_CTRL1 ... MENELAUS_VCORE_CTRL5:
+        return s->vcore[addr - MENELAUS_VCORE_CTRL1];
 
-    case MENELAUS_DCDC_CTRL3: reg ++;
-    case MENELAUS_DCDC_CTRL2: reg ++;
-    case MENELAUS_DCDC_CTRL1:
-        return s->dcdc[reg];
+    case MENELAUS_DCDC_CTRL1 ... MENELAUS_DCDC_CTRL3:
+        return s->dcdc[addr - MENELAUS_DCDC_CTRL1];
 
-    case MENELAUS_LDO_CTRL8: reg ++;
-    case MENELAUS_LDO_CTRL7: reg ++;
-    case MENELAUS_LDO_CTRL6: reg ++;
-    case MENELAUS_LDO_CTRL5: reg ++;
-    case MENELAUS_LDO_CTRL4: reg ++;
-    case MENELAUS_LDO_CTRL3: reg ++;
-    case MENELAUS_LDO_CTRL2: reg ++;
-    case MENELAUS_LDO_CTRL1:
-        return s->ldo[reg];
+    case MENELAUS_LDO_CTRL1 ... MENELAUS_LDO_CTRL8:
+        return s->ldo[addr - MENELAUS_LDO_CTRL1];
 
-    case MENELAUS_SLEEP_CTRL2: reg ++;
     case MENELAUS_SLEEP_CTRL1:
-        return s->sleep[reg];
+    case MENELAUS_SLEEP_CTRL2:
+        return s->sleep[addr - MENELAUS_SLEEP_CTRL1];
 
     case MENELAUS_DEVICE_OFF:
         return 0;
 
     case MENELAUS_OSC_CTRL:
-        return s->osc | (1 << 7);			/* CLK32K_GOOD */
+        return s->osc | (1 << 7);           /* CLK32K_GOOD */
 
     case MENELAUS_DETECT_CTRL:
         return s->detect;
@@ -348,9 +334,9 @@ static uint8_t menelaus_read(void *opaque, uint8_t addr)
         return to_bcd(s->rtc.tm.tm_min);
     case MENELAUS_RTC_HR:
         menelaus_rtc_update(s);
-        if ((s->rtc.ctrl >> 2) & 1)			/* MODE12_n24 */
+        if ((s->rtc.ctrl >> 2) & 1)         /* MODE12_n24 */
             return to_bcd((s->rtc.tm.tm_hour % 12) + 1) |
-                    (!!(s->rtc.tm.tm_hour >= 12) << 7);	/* PM_nAM */
+                    (!!(s->rtc.tm.tm_hour >= 12) << 7); /* PM_nAM */
         else
             return to_bcd(s->rtc.tm.tm_hour);
     case MENELAUS_RTC_DAY:
@@ -370,7 +356,7 @@ static uint8_t menelaus_read(void *opaque, uint8_t addr)
     case MENELAUS_RTC_AL_MIN:
         return to_bcd(s->rtc.alm.tm_min);
     case MENELAUS_RTC_AL_HR:
-        if ((s->rtc.ctrl >> 2) & 1)			/* MODE12_n24 */
+        if ((s->rtc.ctrl >> 2) & 1)         /* MODE12_n24 */
             return to_bcd((s->rtc.alm.tm_hour % 12) + 1) |
                     (!!(s->rtc.alm.tm_hour >= 12) << 7);/* AL_PM_nAM */
         else
@@ -395,10 +381,8 @@ static uint8_t menelaus_read(void *opaque, uint8_t addr)
     case MENELAUS_S2_PULL_DIR:
         return s->pull[3];
 
-    case MENELAUS_MCT_CTRL3: reg ++;
-    case MENELAUS_MCT_CTRL2: reg ++;
-    case MENELAUS_MCT_CTRL1:
-        return s->mmc_ctrl[reg];
+    case MENELAUS_MCT_CTRL1 ... MENELAUS_MCT_CTRL3:
+        return s->mmc_ctrl[addr - MENELAUS_MCT_CTRL1];
     case MENELAUS_MCT_PIN_ST:
         /* TODO: return the real Card Detect */
         return 0;
@@ -418,7 +402,6 @@ static void menelaus_write(void *opaque, uint8_t addr, uint8_t value)
 {
     MenelausState *s = (MenelausState *) opaque;
     int line;
-    int reg = 0;
     struct tm tm;
 
     switch (addr) {
@@ -496,9 +479,9 @@ static void menelaus_write(void *opaque, uint8_t addr, uint8_t value)
         s->ldo[7] = value & 3;
         break;
 
-    case MENELAUS_SLEEP_CTRL2: reg ++;
     case MENELAUS_SLEEP_CTRL1:
-        s->sleep[reg] = value;
+    case MENELAUS_SLEEP_CTRL2:
+        s->sleep[addr - MENELAUS_SLEEP_CTRL1] = value;
         break;
 
     case MENELAUS_DEVICE_OFF:
@@ -558,7 +541,7 @@ static void menelaus_write(void *opaque, uint8_t addr, uint8_t value)
         break;
 
     case MENELAUS_RTC_CTRL:
-        if ((s->rtc.ctrl ^ value) & 1) {			/* RTC_EN */
+        if ((s->rtc.ctrl ^ value) & 1) {    /* RTC_EN */
             if (value & 1)
                 menelaus_rtc_start(s);
             else
@@ -620,7 +603,7 @@ static void menelaus_write(void *opaque, uint8_t addr, uint8_t value)
         default:
             fprintf(stderr, "%s: bad RTC_UPDATE value %02x\n",
                             __func__, value);
-            s->status |= 1 << 10;				/* RTCERR */
+            s->status |= 1 << 10;           /* RTCERR */
             menelaus_update(s);
         }
         s->rtc.sec_offset = qemu_timedate_diff(&tm);
@@ -632,7 +615,7 @@ static void menelaus_write(void *opaque, uint8_t addr, uint8_t value)
         s->rtc.tm.tm_min = from_bcd(value & 0x7f);
         break;
     case MENELAUS_RTC_HR:
-        s->rtc.tm.tm_hour = (s->rtc.ctrl & (1 << 2)) ?	/* MODE12_n24 */
+        s->rtc.tm.tm_hour = (s->rtc.ctrl & (1 << 2)) ?  /* MODE12_n24 */
                 MIN(from_bcd(value & 0x3f), 12) + ((value >> 7) ? 11 : -1) :
                 from_bcd(value & 0x3f);
         break;
@@ -657,7 +640,7 @@ static void menelaus_write(void *opaque, uint8_t addr, uint8_t value)
         menelaus_alm_update(s);
         break;
     case MENELAUS_RTC_AL_HR:
-        s->rtc.alm.tm_hour = (s->rtc.ctrl & (1 << 2)) ?	/* MODE12_n24 */
+        s->rtc.alm.tm_hour = (s->rtc.ctrl & (1 << 2)) ? /* MODE12_n24 */
                 MIN(from_bcd(value & 0x3f), 12) + ((value >> 7) ? 11 : -1) :
                 from_bcd(value & 0x3f);
         menelaus_alm_update(s);
@@ -714,6 +697,7 @@ static void menelaus_write(void *opaque, uint8_t addr, uint8_t value)
 #ifdef VERBOSE
         printf("%s: unknown register %02x\n", __func__, addr);
 #endif
+        break;
     }
 }
 
@@ -762,7 +746,7 @@ static int get_int32_as_uint16(QEMUFile *f, void *pv, size_t size,
 }
 
 static int put_int32_as_uint16(QEMUFile *f, void *pv, size_t size,
-                               const VMStateField *field, QJSON *vmdesc)
+                               const VMStateField *field, JSONWriter *vmdesc)
 {
     int *v = pv;
     qemu_put_be16(f, *v);
@@ -808,14 +792,14 @@ static int menelaus_post_load(void *opaque, int version_id)
 {
     MenelausState *s = opaque;
 
-    if (s->rtc.ctrl & 1)					/* RTC_EN */
+    if (s->rtc.ctrl & 1)                    /* RTC_EN */
         menelaus_rtc_stop(s);
 
     s->rtc.next = s->rtc_next_vmstate;
 
     menelaus_alm_update(s);
     menelaus_update(s);
-    if (s->rtc.ctrl & 1)					/* RTC_EN */
+    if (s->rtc.ctrl & 1)                    /* RTC_EN */
         menelaus_rtc_start(s);
     return 0;
 }

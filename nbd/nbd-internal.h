@@ -13,13 +13,12 @@
 #include "sysemu/block-backend.h"
 #include "io/channel-tls.h"
 
-#include "qemu/coroutine.h"
 #include "qemu/iov.h"
 
 #ifndef _WIN32
 #include <sys/ioctl.h>
 #endif
-#if defined(__sun__) || defined(__HAIKU__)
+#ifdef HAVE_SYS_IOCCOM_H
 #include <sys/ioccom.h>
 #endif
 

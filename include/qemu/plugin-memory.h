@@ -6,8 +6,11 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#ifndef _PLUGIN_MEMORY_H_
-#define _PLUGIN_MEMORY_H_
+#ifndef PLUGIN_MEMORY_H
+#define PLUGIN_MEMORY_H
+
+#include "exec/cpu-defs.h"
+#include "exec/hwaddr.h"
 
 struct qemu_plugin_hwaddr {
     bool is_io;
@@ -18,7 +21,7 @@ struct qemu_plugin_hwaddr {
             hwaddr    offset;
         } io;
         struct {
-            uint64_t hostaddr;
+            void *hostaddr;
         } ram;
     } v;
 };
@@ -34,7 +37,7 @@ struct qemu_plugin_hwaddr {
  * It would only fail if not called from an instrumented memory access
  * which would be an abuse of the API.
  */
-bool tlb_plugin_lookup(CPUState *cpu, target_ulong addr, int mmu_idx,
+bool tlb_plugin_lookup(CPUState *cpu, vaddr addr, int mmu_idx,
                        bool is_store, struct qemu_plugin_hwaddr *data);
 
-#endif /* _PLUGIN_MEMORY_H_ */
+#endif /* PLUGIN_MEMORY_H */

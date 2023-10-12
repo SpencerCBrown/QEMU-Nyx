@@ -9,7 +9,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "cpu.h"
 #include <sys/ioctl.h>
 #include <linux/vfio.h>
 
@@ -45,7 +44,7 @@ static void vfio_prereg_listener_region_add(MemoryListener *listener,
     const hwaddr gpa = section->offset_within_address_space;
     hwaddr end;
     int ret;
-    hwaddr page_mask = qemu_real_host_page_mask;
+    hwaddr page_mask = qemu_real_host_page_mask();
     struct vfio_iommu_spapr_register_memory reg = {
         .argsz = sizeof(reg),
         .flags = 0,
@@ -103,7 +102,7 @@ static void vfio_prereg_listener_region_del(MemoryListener *listener,
     const hwaddr gpa = section->offset_within_address_space;
     hwaddr end;
     int ret;
-    hwaddr page_mask = qemu_real_host_page_mask;
+    hwaddr page_mask = qemu_real_host_page_mask();
     struct vfio_iommu_spapr_register_memory reg = {
         .argsz = sizeof(reg),
         .flags = 0,
@@ -137,6 +136,7 @@ static void vfio_prereg_listener_region_del(MemoryListener *listener,
 }
 
 const MemoryListener vfio_prereg_listener = {
+    .name = "vfio-pre-reg",
     .region_add = vfio_prereg_listener_region_add,
     .region_del = vfio_prereg_listener_region_del,
 };
@@ -147,7 +147,7 @@ int vfio_spapr_create_window(VFIOContainer *container,
 {
     int ret = 0;
     IOMMUMemoryRegion *iommu_mr = IOMMU_MEMORY_REGION(section->mr);
-    uint64_t pagesize = memory_region_iommu_get_min_page_size(iommu_mr);
+    uint64_t pagesize = memory_region_iommu_get_min_page_size(iommu_mr), pgmask;
     unsigned entries, bits_total, bits_per_level, max_levels;
     struct vfio_iommu_spapr_tce_create create = { .argsz = sizeof(create) };
     long rampagesize = qemu_minrampagesize();
@@ -159,8 +159,8 @@ int vfio_spapr_create_window(VFIOContainer *container,
     if (pagesize > rampagesize) {
         pagesize = rampagesize;
     }
-    pagesize = 1ULL << (63 - clz64(container->pgsizes &
-                                   (pagesize | (pagesize - 1))));
+    pgmask = container->pgsizes & (pagesize | (pagesize - 1));
+    pagesize = pgmask ? (1ULL << (63 - clz64(pgmask))) : 0;
     if (!pagesize) {
         error_report("Host doesn't support page size 0x%"PRIx64
                      ", the supported mask is 0x%lx",
@@ -199,12 +199,12 @@ int vfio_spapr_create_window(VFIOContainer *container,
      * Below we look at qemu_real_host_page_size as TCEs are allocated from
      * system pages.
      */
-    bits_per_level = ctz64(qemu_real_host_page_size) + 8;
+    bits_per_level = ctz64(qemu_real_host_page_size()) + 8;
     create.levels = bits_total / bits_per_level;
     if (bits_total % bits_per_level) {
         ++create.levels;
     }
-    max_levels = (64 - create.page_shift) / ctz64(qemu_real_host_page_size);
+    max_levels = (64 - create.page_shift) / ctz64(qemu_real_host_page_size());
     for ( ; create.levels <= max_levels; ++create.levels) {
         ret = ioctl(container->fd, VFIO_IOMMU_SPAPR_TCE_CREATE, &create);
         if (!ret) {

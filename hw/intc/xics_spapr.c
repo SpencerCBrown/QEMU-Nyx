@@ -26,7 +26,6 @@
  */
 
 #include "qemu/osdep.h"
-#include "cpu.h"
 #include "trace.h"
 #include "qemu/timer.h"
 #include "hw/ppc/spapr.h"
@@ -422,10 +421,11 @@ static int xics_spapr_post_load(SpaprInterruptController *intc, int version_id)
     return 0;
 }
 
-static int xics_spapr_activate(SpaprInterruptController *intc, Error **errp)
+static int xics_spapr_activate(SpaprInterruptController *intc,
+                               uint32_t nr_servers, Error **errp)
 {
     if (kvm_enabled()) {
-        return spapr_irq_init_kvm(xics_kvm_connect, intc, errp);
+        return spapr_irq_init_kvm(xics_kvm_connect, intc, nr_servers, errp);
     }
     return 0;
 }

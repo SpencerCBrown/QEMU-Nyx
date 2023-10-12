@@ -10,12 +10,11 @@
  */
 
 #include "qemu/osdep.h"
-#include "qemu-common.h"
 #include "qapi/error.h"
 #include "qemu/error-report.h"
 #include <wchar.h>
 #include <dirent.h>
-
+#include <glib/gstdio.h>
 #include <sys/statvfs.h>
 
 
@@ -28,6 +27,7 @@
 #include "migration/vmstate.h"
 #include "desc.h"
 #include "qemu/units.h"
+#include "qom/object.h"
 
 /* ----------------------------------------------------------------------- */
 
@@ -237,7 +237,7 @@ typedef struct {
 } QEMU_PACKED ObjectInfo;
 
 #define TYPE_USB_MTP "usb-mtp"
-#define USB_MTP(obj) OBJECT_CHECK(MTPState, (obj), TYPE_USB_MTP)
+OBJECT_DECLARE_SIMPLE_TYPE(MTPState, USB_MTP)
 
 #define QEMU_STORAGE_ID 0x00010001
 
@@ -631,9 +631,9 @@ static void usb_mtp_object_readdir(MTPState *s, MTPObject *o)
         int64_t id = qemu_file_monitor_add_watch(s->file_monitor, o->path, NULL,
                                                  file_monitor_event, s, &err);
         if (id == -1) {
-            error_report("usb-mtp: failed to add watch for %s: %s", o->path,
-                         error_get_pretty(err));
-            error_free(err);
+            error_reportf_err(err,
+                              "usb-mtp: failed to add watch for %s: ",
+                              o->path);
         } else {
             trace_usb_mtp_file_monitor_event(s->dev.addr, o->path,
                                              "Watch Added");
@@ -771,12 +771,9 @@ static void usb_mtp_add_str(MTPData *data, const char *str)
 
 static void usb_mtp_add_time(MTPData *data, time_t time)
 {
-    char buf[16];
-    struct tm tm;
-
-    gmtime_r(&time, &tm);
-    strftime(buf, sizeof(buf), "%Y%m%dT%H%M%S", &tm);
-    usb_mtp_add_str(data, buf);
+    g_autoptr(GDateTime) then = g_date_time_new_from_unix_utc(time);
+    g_autofree char *thenstr = g_date_time_format(then, "%Y%m%dT%H%M%S");
+    usb_mtp_add_str(data, thenstr);
 }
 
 /* ----------------------------------------------------------------------- */
@@ -906,7 +903,8 @@ static MTPData *usb_mtp_get_object_handles(MTPState *s, MTPControl *c,
                                            MTPObject *o)
 {
     MTPData *d = usb_mtp_data_alloc(c);
-    uint32_t i = 0, handles[o->nchildren];
+    uint32_t i = 0;
+    g_autofree uint32_t *handles = g_new(uint32_t, o->nchildren);
     MTPObject *iter;
 
     trace_usb_mtp_op_get_object_handles(s->dev.addr, o->handle, o->path);
@@ -1276,9 +1274,8 @@ static void usb_mtp_command(MTPState *s, MTPControl *c)
 
         s->file_monitor = qemu_file_monitor_new(&err);
         if (err) {
-            error_report("usb-mtp: file monitoring init failed: %s",
-                         error_get_pretty(err));
-            error_free(err);
+            error_reportf_err(err,
+                              "usb-mtp: file monitoring init failed: ");
         } else {
             QTAILQ_INIT(&s->events);
         }
@@ -1609,7 +1606,7 @@ static void usb_mtp_write_data(MTPState *s, uint32_t handle)
         usb_mtp_object_lookup(s, s->dataset.parent_handle);
     char *path = NULL;
     uint64_t rc;
-    mode_t mask = 0644;
+    mode_t mask = 0755;
     int ret = 0;
 
     assert(d != NULL);
@@ -1625,7 +1622,7 @@ static void usb_mtp_write_data(MTPState *s, uint32_t handle)
         if (s->dataset.filename) {
             path = g_strdup_printf("%s/%s", parent->path, s->dataset.filename);
             if (s->dataset.format == FMT_ASSOCIATION) {
-                ret = mkdir(path, mask);
+                ret = g_mkdir(path, mask);
                 if (!ret) {
                     usb_mtp_queue_result(s, RES_OK, d->trans, 3,
                                          QEMU_STORAGE_ID,
@@ -1637,7 +1634,7 @@ static void usb_mtp_write_data(MTPState *s, uint32_t handle)
             }
 
             d->fd = open(path, O_CREAT | O_WRONLY |
-                         O_CLOEXEC | O_NOFOLLOW, mask);
+                         O_CLOEXEC | O_NOFOLLOW, mask & 0666);
             if (d->fd == -1) {
                 ret = 1;
                 goto done;
@@ -2105,10 +2102,10 @@ static void usb_mtp_class_initfn(ObjectClass *klass, void *data)
     dc->desc = "USB Media Transfer Protocol device";
     dc->fw_name = "mtp";
     dc->vmsd = &vmstate_usb_mtp;
-    dc->props = mtp_properties;
+    device_class_set_props(dc, mtp_properties);
 }
 
-static TypeInfo mtp_info = {
+static const TypeInfo mtp_info = {
     .name          = TYPE_USB_MTP,
     .parent        = TYPE_USB_DEVICE,
     .instance_size = sizeof(MTPState),

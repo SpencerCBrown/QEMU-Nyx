@@ -23,11 +23,13 @@
  */
 
 #include "qemu/osdep.h"
+#include "sysemu/block-backend.h"
 #include "qapi/error.h"
 #include "qcow2.h"
 #include "qemu/bswap.h"
 #include "qemu/error-report.h"
 #include "qemu/cutils.h"
+#include "qemu/memalign.h"
 
 static void qcow2_free_single_snapshot(BlockDriverState *bs, int i)
 {
@@ -75,10 +77,11 @@ void qcow2_free_snapshots(BlockDriverState *bs)
  *   qcow2_check_refcounts() does not do anything with snapshots'
  *   extra data.)
  */
-static int qcow2_do_read_snapshots(BlockDriverState *bs, bool repair,
-                                   int *nb_clusters_reduced,
-                                   int *extra_data_dropped,
-                                   Error **errp)
+static coroutine_fn GRAPH_RDLOCK
+int qcow2_do_read_snapshots(BlockDriverState *bs, bool repair,
+                            int *nb_clusters_reduced,
+                            int *extra_data_dropped,
+                            Error **errp)
 {
     BDRVQcow2State *s = bs->opaque;
     QCowSnapshotHeader h;
@@ -106,7 +109,7 @@ static int qcow2_do_read_snapshots(BlockDriverState *bs, bool repair,
 
         /* Read statically sized part of the snapshot header */
         offset = ROUND_UP(offset, 8);
-        ret = bdrv_pread(bs->file, offset, &h, sizeof(h));
+        ret = bdrv_co_pread(bs->file, offset, sizeof(h), &h, 0);
         if (ret < 0) {
             error_setg_errno(errp, -ret, "Failed to read snapshot table");
             goto fail;
@@ -144,8 +147,8 @@ static int qcow2_do_read_snapshots(BlockDriverState *bs, bool repair,
         }
 
         /* Read known extra data */
-        ret = bdrv_pread(bs->file, offset, &extra,
-                         MIN(sizeof(extra), sn->extra_data_size));
+        ret = bdrv_co_pread(bs->file, offset,
+                            MIN(sizeof(extra), sn->extra_data_size), &extra, 0);
         if (ret < 0) {
             error_setg_errno(errp, -ret, "Failed to read snapshot table");
             goto fail;
@@ -163,6 +166,12 @@ static int qcow2_do_read_snapshots(BlockDriverState *bs, bool repair,
             sn->disk_size = bs->total_sectors * BDRV_SECTOR_SIZE;
         }
 
+        if (sn->extra_data_size >= endof(QCowSnapshotExtraData, icount)) {
+            sn->icount = be64_to_cpu(extra.icount);
+        } else {
+            sn->icount = -1ULL;
+        }
+
         if (sn->extra_data_size > sizeof(extra)) {
             uint64_t extra_data_end;
             size_t unknown_extra_data_size;
@@ -176,8 +185,8 @@ static int qcow2_do_read_snapshots(BlockDriverState *bs, bool repair,
             /* Store unknown extra data */
             unknown_extra_data_size = sn->extra_data_size - sizeof(extra);
             sn->unknown_extra_data = g_malloc(unknown_extra_data_size);
-            ret = bdrv_pread(bs->file, offset, sn->unknown_extra_data,
-                             unknown_extra_data_size);
+            ret = bdrv_co_pread(bs->file, offset, unknown_extra_data_size,
+                                sn->unknown_extra_data, 0);
             if (ret < 0) {
                 error_setg_errno(errp, -ret,
                                  "Failed to read snapshot table");
@@ -188,7 +197,7 @@ static int qcow2_do_read_snapshots(BlockDriverState *bs, bool repair,
 
         /* Read snapshot ID */
         sn->id_str = g_malloc(id_str_size + 1);
-        ret = bdrv_pread(bs->file, offset, sn->id_str, id_str_size);
+        ret = bdrv_co_pread(bs->file, offset, id_str_size, sn->id_str, 0);
         if (ret < 0) {
             error_setg_errno(errp, -ret, "Failed to read snapshot table");
             goto fail;
@@ -198,7 +207,7 @@ static int qcow2_do_read_snapshots(BlockDriverState *bs, bool repair,
 
         /* Read snapshot name */
         sn->name = g_malloc(name_size + 1);
-        ret = bdrv_pread(bs->file, offset, sn->name, name_size);
+        ret = bdrv_co_pread(bs->file, offset, name_size, sn->name, 0);
         if (ret < 0) {
             error_setg_errno(errp, -ret, "Failed to read snapshot table");
             goto fail;
@@ -253,7 +262,7 @@ fail:
     return ret;
 }
 
-int qcow2_read_snapshots(BlockDriverState *bs, Error **errp)
+int coroutine_fn qcow2_read_snapshots(BlockDriverState *bs, Error **errp)
 {
     return qcow2_do_read_snapshots(bs, false, NULL, NULL, errp);
 }
@@ -332,6 +341,7 @@ int qcow2_write_snapshots(BlockDriverState *bs)
         memset(&extra, 0, sizeof(extra));
         extra.vm_state_size_large = cpu_to_be64(sn->vm_state_size);
         extra.disk_size = cpu_to_be64(sn->disk_size);
+        extra.icount = cpu_to_be64(sn->icount);
 
         id_str_size = strlen(sn->id_str);
         name_size = strlen(sn->name);
@@ -340,13 +350,13 @@ int qcow2_write_snapshots(BlockDriverState *bs)
         h.name_size = cpu_to_be16(name_size);
         offset = ROUND_UP(offset, 8);
 
-        ret = bdrv_pwrite(bs->file, offset, &h, sizeof(h));
+        ret = bdrv_pwrite(bs->file, offset, sizeof(h), &h, 0);
         if (ret < 0) {
             goto fail;
         }
         offset += sizeof(h);
 
-        ret = bdrv_pwrite(bs->file, offset, &extra, sizeof(extra));
+        ret = bdrv_pwrite(bs->file, offset, sizeof(extra), &extra, 0);
         if (ret < 0) {
             goto fail;
         }
@@ -360,21 +370,21 @@ int qcow2_write_snapshots(BlockDriverState *bs)
             assert(unknown_extra_data_size <= BDRV_REQUEST_MAX_BYTES);
             assert(sn->unknown_extra_data);
 
-            ret = bdrv_pwrite(bs->file, offset, sn->unknown_extra_data,
-                              unknown_extra_data_size);
+            ret = bdrv_pwrite(bs->file, offset, unknown_extra_data_size,
+                              sn->unknown_extra_data, 0);
             if (ret < 0) {
                 goto fail;
             }
             offset += unknown_extra_data_size;
         }
 
-        ret = bdrv_pwrite(bs->file, offset, sn->id_str, id_str_size);
+        ret = bdrv_pwrite(bs->file, offset, id_str_size, sn->id_str, 0);
         if (ret < 0) {
             goto fail;
         }
         offset += id_str_size;
 
-        ret = bdrv_pwrite(bs->file, offset, sn->name, name_size);
+        ret = bdrv_pwrite(bs->file, offset, name_size, sn->name, 0);
         if (ret < 0) {
             goto fail;
         }
@@ -397,7 +407,7 @@ int qcow2_write_snapshots(BlockDriverState *bs)
     header_data.snapshots_offset    = cpu_to_be64(snapshots_offset);
 
     ret = bdrv_pwrite_sync(bs->file, offsetof(QCowHeader, nb_snapshots),
-                           &header_data, sizeof(header_data));
+                           sizeof(header_data), &header_data, 0);
     if (ret < 0) {
         goto fail;
     }
@@ -432,8 +442,9 @@ int coroutine_fn qcow2_check_read_snapshot_table(BlockDriverState *bs,
     } QEMU_PACKED snapshot_table_pointer;
 
     /* qcow2_do_open() discards this information in check mode */
-    ret = bdrv_pread(bs->file, offsetof(QCowHeader, nb_snapshots),
-                     &snapshot_table_pointer, sizeof(snapshot_table_pointer));
+    ret = bdrv_co_pread(bs->file, offsetof(QCowHeader, nb_snapshots),
+                        sizeof(snapshot_table_pointer), &snapshot_table_pointer,
+                        0);
     if (ret < 0) {
         result->check_errors++;
         fprintf(stderr, "ERROR failed to read the snapshot table pointer from "
@@ -502,9 +513,9 @@ int coroutine_fn qcow2_check_read_snapshot_table(BlockDriverState *bs,
         assert(fix & BDRV_FIX_ERRORS);
 
         snapshot_table_pointer.nb_snapshots = cpu_to_be32(s->nb_snapshots);
-        ret = bdrv_pwrite_sync(bs->file, offsetof(QCowHeader, nb_snapshots),
-                               &snapshot_table_pointer.nb_snapshots,
-                               sizeof(snapshot_table_pointer.nb_snapshots));
+        ret = bdrv_co_pwrite_sync(bs->file, offsetof(QCowHeader, nb_snapshots),
+                                  sizeof(snapshot_table_pointer.nb_snapshots),
+                                  &snapshot_table_pointer.nb_snapshots, 0);
         if (ret < 0) {
             result->check_errors++;
             fprintf(stderr, "ERROR failed to update the snapshot count in the "
@@ -655,10 +666,11 @@ int qcow2_snapshot_create(BlockDriverState *bs, QEMUSnapshotInfo *sn_info)
     sn->date_sec = sn_info->date_sec;
     sn->date_nsec = sn_info->date_nsec;
     sn->vm_clock_nsec = sn_info->vm_clock_nsec;
+    sn->icount = sn_info->icount;
     sn->extra_data_size = sizeof(QCowSnapshotExtraData);
 
     /* Allocate the L1 table of the snapshot and copy the current one there. */
-    l1_table_offset = qcow2_alloc_clusters(bs, s->l1_size * sizeof(uint64_t));
+    l1_table_offset = qcow2_alloc_clusters(bs, s->l1_size * L1E_SIZE);
     if (l1_table_offset < 0) {
         ret = l1_table_offset;
         goto fail;
@@ -678,13 +690,13 @@ int qcow2_snapshot_create(BlockDriverState *bs, QEMUSnapshotInfo *sn_info)
     }
 
     ret = qcow2_pre_write_overlap_check(bs, 0, sn->l1_table_offset,
-                                        s->l1_size * sizeof(uint64_t), false);
+                                        s->l1_size * L1E_SIZE, false);
     if (ret < 0) {
         goto fail;
     }
 
-    ret = bdrv_pwrite(bs->file, sn->l1_table_offset, l1_table,
-                      s->l1_size * sizeof(uint64_t));
+    ret = bdrv_pwrite(bs->file, sn->l1_table_offset, s->l1_size * L1E_SIZE,
+                      l1_table, 0);
     if (ret < 0) {
         goto fail;
     }
@@ -767,7 +779,7 @@ int qcow2_snapshot_goto(BlockDriverState *bs, const char *snapshot_id)
     sn = &s->snapshots[snapshot_index];
 
     ret = qcow2_validate_table(bs, sn->l1_table_offset, sn->l1_size,
-                               sizeof(uint64_t), QCOW_MAX_L1_SIZE,
+                               L1E_SIZE, QCOW_MAX_L1_SIZE,
                                "Snapshot L1 table", &local_err);
     if (ret < 0) {
         error_report_err(local_err);
@@ -775,10 +787,21 @@ int qcow2_snapshot_goto(BlockDriverState *bs, const char *snapshot_id)
     }
 
     if (sn->disk_size != bs->total_sectors * BDRV_SECTOR_SIZE) {
-        error_report("qcow2: Loading snapshots with different disk "
-            "size is not implemented");
-        ret = -ENOTSUP;
-        goto fail;
+        BlockBackend *blk = blk_new_with_bs(bs, BLK_PERM_RESIZE, BLK_PERM_ALL,
+                                            &local_err);
+        if (!blk) {
+            error_report_err(local_err);
+            ret = -ENOTSUP;
+            goto fail;
+        }
+
+        ret = blk_truncate(blk, sn->disk_size, true, PREALLOC_MODE_OFF, 0,
+                           &local_err);
+        blk_unref(blk);
+        if (ret < 0) {
+            error_report_err(local_err);
+            goto fail;
+        }
     }
 
     /*
@@ -791,8 +814,8 @@ int qcow2_snapshot_goto(BlockDriverState *bs, const char *snapshot_id)
         goto fail;
     }
 
-    cur_l1_bytes = s->l1_size * sizeof(uint64_t);
-    sn_l1_bytes = sn->l1_size * sizeof(uint64_t);
+    cur_l1_bytes = s->l1_size * L1E_SIZE;
+    sn_l1_bytes = sn->l1_size * L1E_SIZE;
 
     /*
      * Copy the snapshot L1 table to the current L1 table.
@@ -808,8 +831,8 @@ int qcow2_snapshot_goto(BlockDriverState *bs, const char *snapshot_id)
         goto fail;
     }
 
-    ret = bdrv_pread(bs->file, sn->l1_table_offset,
-                     sn_l1_table, sn_l1_bytes);
+    ret = bdrv_pread(bs->file, sn->l1_table_offset, sn_l1_bytes, sn_l1_table,
+                     0);
     if (ret < 0) {
         goto fail;
     }
@@ -827,8 +850,8 @@ int qcow2_snapshot_goto(BlockDriverState *bs, const char *snapshot_id)
         goto fail;
     }
 
-    ret = bdrv_pwrite_sync(bs->file, s->l1_table_offset, sn_l1_table,
-                           cur_l1_bytes);
+    ret = bdrv_pwrite_sync(bs->file, s->l1_table_offset, cur_l1_bytes,
+                           sn_l1_table, 0);
     if (ret < 0) {
         goto fail;
     }
@@ -905,7 +928,7 @@ int qcow2_snapshot_delete(BlockDriverState *bs,
     sn = s->snapshots[snapshot_index];
 
     ret = qcow2_validate_table(bs, sn.l1_table_offset, sn.l1_size,
-                               sizeof(uint64_t), QCOW_MAX_L1_SIZE,
+                               L1E_SIZE, QCOW_MAX_L1_SIZE,
                                "Snapshot L1 table", errp);
     if (ret < 0) {
         return ret;
@@ -941,7 +964,7 @@ int qcow2_snapshot_delete(BlockDriverState *bs,
         error_setg_errno(errp, -ret, "Failed to free the cluster and L1 table");
         return ret;
     }
-    qcow2_free_clusters(bs, sn.l1_table_offset, sn.l1_size * sizeof(uint64_t),
+    qcow2_free_clusters(bs, sn.l1_table_offset, sn.l1_size * L1E_SIZE,
                         QCOW2_DISCARD_SNAPSHOT);
 
     /* must update the copied flag on the current cluster offsets */
@@ -988,6 +1011,7 @@ int qcow2_snapshot_list(BlockDriverState *bs, QEMUSnapshotInfo **psn_tab)
         sn_info->date_sec = sn->date_sec;
         sn_info->date_nsec = sn->date_nsec;
         sn_info->vm_clock_nsec = sn->vm_clock_nsec;
+        sn_info->icount = sn->icount;
     }
     *psn_tab = sn_tab;
     return s->nb_snapshots;
@@ -1005,7 +1029,7 @@ int qcow2_snapshot_load_tmp(BlockDriverState *bs,
     int new_l1_bytes;
     int ret;
 
-    assert(bs->read_only);
+    assert(bdrv_is_read_only(bs));
 
     /* Search the snapshot */
     snapshot_index = find_snapshot_by_id_and_name(bs, snapshot_id, name);
@@ -1018,20 +1042,19 @@ int qcow2_snapshot_load_tmp(BlockDriverState *bs,
 
     /* Allocate and read in the snapshot's L1 table */
     ret = qcow2_validate_table(bs, sn->l1_table_offset, sn->l1_size,
-                               sizeof(uint64_t), QCOW_MAX_L1_SIZE,
+                               L1E_SIZE, QCOW_MAX_L1_SIZE,
                                "Snapshot L1 table", errp);
     if (ret < 0) {
         return ret;
     }
-    new_l1_bytes = sn->l1_size * sizeof(uint64_t);
-    new_l1_table = qemu_try_blockalign(bs->file->bs,
-                                       ROUND_UP(new_l1_bytes, 512));
+    new_l1_bytes = sn->l1_size * L1E_SIZE;
+    new_l1_table = qemu_try_blockalign(bs->file->bs, new_l1_bytes);
     if (new_l1_table == NULL) {
         return -ENOMEM;
     }
 
-    ret = bdrv_pread(bs->file, sn->l1_table_offset,
-                     new_l1_table, new_l1_bytes);
+    ret = bdrv_pread(bs->file, sn->l1_table_offset, new_l1_bytes,
+                     new_l1_table, 0);
     if (ret < 0) {
         error_setg(errp, "Failed to read l1 table for snapshot");
         qemu_vfree(new_l1_table);

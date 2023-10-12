@@ -36,13 +36,14 @@ Options
 .. option:: -m, --method=METHOD
 
   Transport method: one of ``unix-listen``, ``virtio-serial``, or
-  ``isa-serial`` (``virtio-serial`` is the default).
+  ``isa-serial``, or ``vsock-listen`` (``virtio-serial`` is the default).
 
 .. option:: -p, --path=PATH
 
   Device/socket path (the default for virtio-serial is
   ``/dev/virtio-ports/org.qemu.guest_agent.0``,
-  the default for isa-serial is ``/dev/ttyS0``)
+  the default for isa-serial is ``/dev/ttyS0``). Socket addresses for
+  vsock-listen are written as ``<cid>:<port>``.
 
 .. option:: -l, --logfile=PATH
 
@@ -78,10 +79,15 @@ Options
 
   Daemonize after startup (detach from terminal).
 
-.. option:: -b, --blacklist=LIST
+.. option:: -b, --block-rpcs=LIST
 
-  Comma-separated list of RPCs to disable (no spaces, ``?`` to list
-  available RPCs).
+  Comma-separated list of RPCs to disable (no spaces, use ``help`` to
+  list available RPCs).
+
+.. option:: -a, --allow-rpcs=LIST
+
+  Comma-separated list of RPCs to enable (no spaces, use ``help`` to
+  list available RPCs).
 
 .. option:: -D, --dump-conf
 
@@ -124,7 +130,7 @@ pidfile        string
 fsfreeze-hook  string
 statedir       string
 verbose        boolean
-blacklist      string list
+block-rpcs     string list
 =============  ===========
 
 See also

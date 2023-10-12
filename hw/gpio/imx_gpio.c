@@ -277,7 +277,6 @@ static const VMStateDescription vmstate_imx_gpio = {
     .name = TYPE_IMX_GPIO,
     .version_id = 1,
     .minimum_version_id = 1,
-    .minimum_version_id_old = 1,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32(dr, IMXGPIOState),
         VMSTATE_UINT32(gdir, IMXGPIOState),
@@ -335,7 +334,7 @@ static void imx_gpio_class_init(ObjectClass *klass, void *data)
 
     dc->realize = imx_gpio_realize;
     dc->reset = imx_gpio_reset;
-    dc->props = imx_gpio_properties;
+    device_class_set_props(dc, imx_gpio_properties);
     dc->vmsd = &vmstate_imx_gpio;
     dc->desc = "i.MX GPIO controller";
 }

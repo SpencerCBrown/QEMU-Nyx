@@ -45,11 +45,16 @@
 #include "qemu/osdep.h"
 #include "cpu.h"
 #include "tcg/tcg.h"
+#include "tcg/tcg-temp-internal.h"
 #include "tcg/tcg-op.h"
-#include "trace/mem.h"
 #include "exec/exec-all.h"
 #include "exec/plugin-gen.h"
 #include "exec/translator.h"
+#include "exec/helper-proto-common.h"
+
+#define HELPER_H  "accel/tcg/plugin-helpers.h"
+#include "exec/helper-info.c.inc"
+#undef  HELPER_H
 
 #ifdef CONFIG_SOFTMMU
 # define CONFIG_SOFTMMU_GATE 1
@@ -93,30 +98,12 @@ void HELPER(plugin_vcpu_mem_cb)(unsigned int vcpu_index,
                                 void *userdata)
 { }
 
-static void do_gen_mem_cb(TCGv vaddr, uint32_t info)
-{
-    TCGv_i32 cpu_index = tcg_temp_new_i32();
-    TCGv_i32 meminfo = tcg_const_i32(info);
-    TCGv_i64 vaddr64 = tcg_temp_new_i64();
-    TCGv_ptr udata = tcg_const_ptr(NULL);
-
-    tcg_gen_ld_i32(cpu_index, cpu_env,
-                   -offsetof(ArchCPU, env) + offsetof(CPUState, cpu_index));
-    tcg_gen_extu_tl_i64(vaddr64, vaddr);
-
-    gen_helper_plugin_vcpu_mem_cb(cpu_index, meminfo, vaddr64, udata);
-
-    tcg_temp_free_ptr(udata);
-    tcg_temp_free_i64(vaddr64);
-    tcg_temp_free_i32(meminfo);
-    tcg_temp_free_i32(cpu_index);
-}
-
 static void gen_empty_udata_cb(void)
 {
-    TCGv_i32 cpu_index = tcg_temp_new_i32();
-    TCGv_ptr udata = tcg_const_ptr(NULL); /* will be overwritten later */
+    TCGv_i32 cpu_index = tcg_temp_ebb_new_i32();
+    TCGv_ptr udata = tcg_temp_ebb_new_ptr();
 
+    tcg_gen_movi_ptr(udata, 0);
     tcg_gen_ld_i32(cpu_index, cpu_env,
                    -offsetof(ArchCPU, env) + offsetof(CPUState, cpu_index));
     gen_helper_plugin_vcpu_udata_cb(cpu_index, udata);
@@ -131,9 +118,10 @@ static void gen_empty_udata_cb(void)
  */
 static void gen_empty_inline_cb(void)
 {
-    TCGv_i64 val = tcg_temp_new_i64();
-    TCGv_ptr ptr = tcg_const_ptr(NULL); /* overwritten later */
+    TCGv_i64 val = tcg_temp_ebb_new_i64();
+    TCGv_ptr ptr = tcg_temp_ebb_new_ptr();
 
+    tcg_gen_movi_ptr(ptr, 0);
     tcg_gen_ld_i64(val, ptr, 0);
     /* pass an immediate != 0 so that it doesn't get optimized away */
     tcg_gen_addi_i64(val, val, 0xdeadface);
@@ -142,9 +130,22 @@ static void gen_empty_inline_cb(void)
     tcg_temp_free_i64(val);
 }
 
-static void gen_empty_mem_cb(TCGv addr, uint32_t info)
+static void gen_empty_mem_cb(TCGv_i64 addr, uint32_t info)
 {
-    do_gen_mem_cb(addr, info);
+    TCGv_i32 cpu_index = tcg_temp_ebb_new_i32();
+    TCGv_i32 meminfo = tcg_temp_ebb_new_i32();
+    TCGv_ptr udata = tcg_temp_ebb_new_ptr();
+
+    tcg_gen_movi_i32(meminfo, info);
+    tcg_gen_movi_ptr(udata, 0);
+    tcg_gen_ld_i32(cpu_index, cpu_env,
+                   -offsetof(ArchCPU, env) + offsetof(CPUState, cpu_index));
+
+    gen_helper_plugin_vcpu_mem_cb(cpu_index, meminfo, addr, udata);
+
+    tcg_temp_free_ptr(udata);
+    tcg_temp_free_i32(meminfo);
+    tcg_temp_free_i32(cpu_index);
 }
 
 /*
@@ -153,23 +154,18 @@ static void gen_empty_mem_cb(TCGv addr, uint32_t info)
  */
 static void gen_empty_mem_helper(void)
 {
-    TCGv_ptr ptr;
+    TCGv_ptr ptr = tcg_temp_ebb_new_ptr();
 
-    ptr = tcg_const_ptr(NULL);
+    tcg_gen_movi_ptr(ptr, 0);
     tcg_gen_st_ptr(ptr, cpu_env, offsetof(CPUState, plugin_mem_cbs) -
                                  offsetof(ArchCPU, env));
     tcg_temp_free_ptr(ptr);
 }
 
-static inline
-void gen_plugin_cb_start(enum plugin_gen_from from,
-                         enum plugin_gen_cb type, unsigned wr)
+static void gen_plugin_cb_start(enum plugin_gen_from from,
+                                enum plugin_gen_cb type, unsigned wr)
 {
-    TCGOp *op;
-
     tcg_gen_plugin_cb_start(from, type, wr);
-    op = tcg_last_op();
-    QSIMPLEQ_INSERT_TAIL(&tcg_ctx->plugin_ops, op, plugin_link);
 }
 
 static void gen_wrapped(enum plugin_gen_from from,
@@ -180,7 +176,7 @@ static void gen_wrapped(enum plugin_gen_from from,
     tcg_gen_plugin_cb_end();
 }
 
-static inline void plugin_gen_empty_callback(enum plugin_gen_from from)
+static void plugin_gen_empty_callback(enum plugin_gen_from from)
 {
     switch (from) {
     case PLUGIN_GEN_AFTER_INSN:
@@ -204,35 +200,17 @@ static inline void plugin_gen_empty_callback(enum plugin_gen_from from)
     }
 }
 
-union mem_gen_fn {
-    void (*mem_fn)(TCGv, uint32_t);
-    void (*inline_fn)(void);
-};
-
-static void gen_mem_wrapped(enum plugin_gen_cb type,
-                            const union mem_gen_fn *f, TCGv addr,
-                            uint32_t info, bool is_mem)
+void plugin_gen_empty_mem_callback(TCGv_i64 addr, uint32_t info)
 {
-    int wr = !!(info & TRACE_MEM_ST);
+    enum qemu_plugin_mem_rw rw = get_plugin_meminfo_rw(info);
 
-    gen_plugin_cb_start(PLUGIN_GEN_FROM_MEM, type, wr);
-    if (is_mem) {
-        f->mem_fn(addr, info);
-    } else {
-        f->inline_fn();
-    }
+    gen_plugin_cb_start(PLUGIN_GEN_FROM_MEM, PLUGIN_GEN_CB_MEM, rw);
+    gen_empty_mem_cb(addr, info);
     tcg_gen_plugin_cb_end();
-}
 
-void plugin_gen_empty_mem_callback(TCGv addr, uint32_t info)
-{
-    union mem_gen_fn fn;
-
-    fn.mem_fn = gen_empty_mem_cb;
-    gen_mem_wrapped(PLUGIN_GEN_CB_MEM, &fn, addr, info, true);
-
-    fn.inline_fn = gen_empty_inline_cb;
-    gen_mem_wrapped(PLUGIN_GEN_CB_INLINE, &fn, 0, info, false);
+    gen_plugin_cb_start(PLUGIN_GEN_FROM_MEM, PLUGIN_GEN_CB_INLINE, rw);
+    gen_empty_inline_cb();
+    tcg_gen_plugin_cb_end();
 }
 
 static TCGOp *find_op(TCGOp *op, TCGOpcode opc)
@@ -265,10 +243,13 @@ static TCGOp *rm_ops(TCGOp *op)
 
 static TCGOp *copy_op_nocheck(TCGOp **begin_op, TCGOp *op)
 {
-    *begin_op = QTAILQ_NEXT(*begin_op, link);
-    tcg_debug_assert(*begin_op);
-    op = tcg_op_insert_after(tcg_ctx, op, (*begin_op)->opc);
-    memcpy(op->args, (*begin_op)->args, sizeof(op->args));
+    TCGOp *old_op = QTAILQ_NEXT(*begin_op, link);
+    unsigned nargs = old_op->nargs;
+
+    *begin_op = old_op;
+    op = tcg_op_insert_after(tcg_ctx, op, old_op->opc, nargs);
+    memcpy(op->args, old_op->args, sizeof(op->args[0]) * nargs);
+
     return op;
 }
 
@@ -279,76 +260,16 @@ static TCGOp *copy_op(TCGOp **begin_op, TCGOp *op, TCGOpcode opc)
     return op;
 }
 
-static TCGOp *copy_extu_i32_i64(TCGOp **begin_op, TCGOp *op)
-{
-    if (TCG_TARGET_REG_BITS == 32) {
-        /* mov_i32 */
-        op = copy_op(begin_op, op, INDEX_op_mov_i32);
-        /* movi_i32 */
-        op = copy_op(begin_op, op, INDEX_op_movi_i32);
-    } else {
-        /* extu_i32_i64 */
-        op = copy_op(begin_op, op, INDEX_op_extu_i32_i64);
-    }
-    return op;
-}
-
-static TCGOp *copy_mov_i64(TCGOp **begin_op, TCGOp *op)
-{
-    if (TCG_TARGET_REG_BITS == 32) {
-        /* 2x mov_i32 */
-        op = copy_op(begin_op, op, INDEX_op_mov_i32);
-        op = copy_op(begin_op, op, INDEX_op_mov_i32);
-    } else {
-        /* mov_i64 */
-        op = copy_op(begin_op, op, INDEX_op_mov_i64);
-    }
-    return op;
-}
-
-static TCGOp *copy_movi_i64(TCGOp **begin_op, TCGOp *op, uint64_t v)
-{
-    if (TCG_TARGET_REG_BITS == 32) {
-        /* 2x movi_i32 */
-        op = copy_op(begin_op, op, INDEX_op_movi_i32);
-        op->args[1] = v;
-
-        op = copy_op(begin_op, op, INDEX_op_movi_i32);
-        op->args[1] = v >> 32;
-    } else {
-        /* movi_i64 */
-        op = copy_op(begin_op, op, INDEX_op_movi_i64);
-        op->args[1] = v;
-    }
-    return op;
-}
-
 static TCGOp *copy_const_ptr(TCGOp **begin_op, TCGOp *op, void *ptr)
 {
     if (UINTPTR_MAX == UINT32_MAX) {
-        /* movi_i32 */
-        op = copy_op(begin_op, op, INDEX_op_movi_i32);
-        op->args[1] = (uintptr_t)ptr;
-    } else {
-        /* movi_i64 */
-        op = copy_movi_i64(begin_op, op, (uint64_t)(uintptr_t)ptr);
-    }
-    return op;
-}
-
-static TCGOp *copy_const_i64(TCGOp **begin_op, TCGOp *op, uint64_t v)
-{
-    return copy_movi_i64(begin_op, op, v);
-}
-
-static TCGOp *copy_extu_tl_i64(TCGOp **begin_op, TCGOp *op)
-{
-    if (TARGET_LONG_BITS == 32) {
-        /* extu_i32_i64 */
-        op = copy_extu_i32_i64(begin_op, op);
+        /* mov_i32 */
+        op = copy_op(begin_op, op, INDEX_op_mov_i32);
+        op->args[1] = tcgv_i32_arg(tcg_constant_i32((uintptr_t)ptr));
     } else {
         /* mov_i64 */
-        op = copy_mov_i64(begin_op, op);
+        op = copy_op(begin_op, op, INDEX_op_mov_i64);
+        op->args[1] = tcgv_i64_arg(tcg_constant_i64((uintptr_t)ptr));
     }
     return op;
 }
@@ -379,14 +300,17 @@ static TCGOp *copy_st_i64(TCGOp **begin_op, TCGOp *op)
     return op;
 }
 
-static TCGOp *copy_add_i64(TCGOp **begin_op, TCGOp *op)
+static TCGOp *copy_add_i64(TCGOp **begin_op, TCGOp *op, uint64_t v)
 {
     if (TCG_TARGET_REG_BITS == 32) {
         /* all 32-bit backends must implement add2_i32 */
         g_assert(TCG_TARGET_HAS_add2_i32);
         op = copy_op(begin_op, op, INDEX_op_add2_i32);
+        op->args[4] = tcgv_i32_arg(tcg_constant_i32(v));
+        op->args[5] = tcgv_i32_arg(tcg_constant_i32(v >> 32));
     } else {
         op = copy_op(begin_op, op, INDEX_op_add_i64);
+        op->args[2] = tcgv_i64_arg(tcg_constant_i64(v));
     }
     return op;
 }
@@ -404,38 +328,35 @@ static TCGOp *copy_st_ptr(TCGOp **begin_op, TCGOp *op)
 }
 
 static TCGOp *copy_call(TCGOp **begin_op, TCGOp *op, void *empty_func,
-                        void *func, unsigned tcg_flags, int *cb_idx)
+                        void *func, int *cb_idx)
 {
+    TCGOp *old_op;
+    int func_idx;
+
     /* copy all ops until the call */
     do {
         op = copy_op_nocheck(begin_op, op);
     } while (op->opc != INDEX_op_call);
 
     /* fill in the op call */
-    op->param1 = (*begin_op)->param1;
-    op->param2 = (*begin_op)->param2;
+    old_op = *begin_op;
+    TCGOP_CALLI(op) = TCGOP_CALLI(old_op);
+    TCGOP_CALLO(op) = TCGOP_CALLO(old_op);
     tcg_debug_assert(op->life == 0);
-    if (*cb_idx == -1) {
-        int i;
 
-        /*
-         * Instead of working out the position of the callback in args[], just
-         * look for @empty_func, since it should be a unique pointer.
-         */
-        for (i = 0; i < MAX_OPC_PARAM_ARGS; i++) {
-            if ((uintptr_t)(*begin_op)->args[i] == (uintptr_t)empty_func) {
-                *cb_idx = i;
-                break;
-            }
-        }
-        tcg_debug_assert(i < MAX_OPC_PARAM_ARGS);
-    }
-    op->args[*cb_idx] = (uintptr_t)func;
-    op->args[*cb_idx + 1] = tcg_flags;
+    func_idx = TCGOP_CALLO(op) + TCGOP_CALLI(op);
+    *cb_idx = func_idx;
+    op->args[func_idx] = (uintptr_t)func;
 
     return op;
 }
 
+/*
+ * When we append/replace ops here we are sensitive to changing patterns of
+ * TCGOps generated by the tcg_gen_FOO calls when we generated the
+ * empty callbacks. This will assert very quickly in a debug build as
+ * we assert the ops we are replacing are the correct ones.
+ */
 static TCGOp *append_udata_cb(const struct qemu_plugin_dyn_cb *cb,
                               TCGOp *begin_op, TCGOp *op, int *cb_idx)
 {
@@ -443,16 +364,16 @@ static TCGOp *append_udata_cb(const struct qemu_plugin_dyn_cb *cb,
     op = copy_const_ptr(&begin_op, op, cb->userp);
 
     /* copy the ld_i32, but note that we only have to copy it once */
-    begin_op = QTAILQ_NEXT(begin_op, link);
-    tcg_debug_assert(begin_op && begin_op->opc == INDEX_op_ld_i32);
     if (*cb_idx == -1) {
-        op = tcg_op_insert_after(tcg_ctx, op, INDEX_op_ld_i32);
-        memcpy(op->args, begin_op->args, sizeof(op->args));
+        op = copy_op(&begin_op, op, INDEX_op_ld_i32);
+    } else {
+        begin_op = QTAILQ_NEXT(begin_op, link);
+        tcg_debug_assert(begin_op && begin_op->opc == INDEX_op_ld_i32);
     }
 
     /* call */
     op = copy_call(&begin_op, op, HELPER(plugin_vcpu_udata_cb),
-                   cb->f.vcpu_udata, cb->tcg_flags, cb_idx);
+                   cb->f.vcpu_udata, cb_idx);
 
     return op;
 }
@@ -467,11 +388,8 @@ static TCGOp *append_inline_cb(const struct qemu_plugin_dyn_cb *cb,
     /* ld_i64 */
     op = copy_ld_i64(&begin_op, op);
 
-    /* const_i64 */
-    op = copy_const_i64(&begin_op, op, cb->inline_insn.imm);
-
     /* add_i64 */
-    op = copy_add_i64(&begin_op, op);
+    op = copy_add_i64(&begin_op, op, cb->inline_insn.imm);
 
     /* st_i64 */
     op = copy_st_i64(&begin_op, op);
@@ -486,27 +404,24 @@ static TCGOp *append_mem_cb(const struct qemu_plugin_dyn_cb *cb,
 
     tcg_debug_assert(type == PLUGIN_GEN_CB_MEM);
 
-    /* const_i32 == movi_i32 ("info", so it remains as is) */
-    op = copy_op(&begin_op, op, INDEX_op_movi_i32);
+    /* const_i32 == mov_i32 ("info", so it remains as is) */
+    op = copy_op(&begin_op, op, INDEX_op_mov_i32);
 
     /* const_ptr */
     op = copy_const_ptr(&begin_op, op, cb->userp);
 
     /* copy the ld_i32, but note that we only have to copy it once */
-    begin_op = QTAILQ_NEXT(begin_op, link);
-    tcg_debug_assert(begin_op && begin_op->opc == INDEX_op_ld_i32);
     if (*cb_idx == -1) {
-        op = tcg_op_insert_after(tcg_ctx, op, INDEX_op_ld_i32);
-        memcpy(op->args, begin_op->args, sizeof(op->args));
+        op = copy_op(&begin_op, op, INDEX_op_ld_i32);
+    } else {
+        begin_op = QTAILQ_NEXT(begin_op, link);
+        tcg_debug_assert(begin_op && begin_op->opc == INDEX_op_ld_i32);
     }
-
-    /* extu_tl_i64 */
-    op = copy_extu_tl_i64(&begin_op, op);
 
     if (type == PLUGIN_GEN_CB_MEM) {
         /* call */
         op = copy_call(&begin_op, op, HELPER(plugin_vcpu_mem_cb),
-                       cb->f.vcpu_udata, cb->tcg_flags, cb_idx);
+                       cb->f.vcpu_udata, cb_idx);
     }
 
     return op;
@@ -529,9 +444,8 @@ static bool op_rw(const TCGOp *op, const struct qemu_plugin_dyn_cb *cb)
     return !!(cb->rw & (w + 1));
 }
 
-static inline
-void inject_cb_type(const GArray *cbs, TCGOp *begin_op, inject_fn inject,
-                    op_ok_fn ok)
+static void inject_cb_type(const GArray *cbs, TCGOp *begin_op,
+                           inject_fn inject, op_ok_fn ok)
 {
     TCGOp *end_op;
     TCGOp *op;
@@ -608,7 +522,8 @@ static void inject_mem_helper(TCGOp *begin_op, GArray *arr)
  * is possible that the code we generate after the instruction is
  * dead, we also add checks before generating tb_exit etc.
  */
-static void inject_mem_enable_helper(struct qemu_plugin_insn *plugin_insn,
+static void inject_mem_enable_helper(struct qemu_plugin_tb *ptb,
+                                     struct qemu_plugin_insn *plugin_insn,
                                      TCGOp *begin_op)
 {
     GArray *cbs[2];
@@ -628,6 +543,7 @@ static void inject_mem_enable_helper(struct qemu_plugin_insn *plugin_insn,
         rm_ops(begin_op);
         return;
     }
+    ptb->mem_helper = true;
 
     arr = g_array_sized_new(false, false,
                             sizeof(struct qemu_plugin_dyn_cb), n_cbs);
@@ -653,17 +569,20 @@ static void inject_mem_disable_helper(struct qemu_plugin_insn *plugin_insn,
 /* called before finishing a TB with exit_tb, goto_tb or goto_ptr */
 void plugin_gen_disable_mem_helpers(void)
 {
-    TCGv_ptr ptr;
-
-    if (likely(tcg_ctx->plugin_insn == NULL ||
-               !tcg_ctx->plugin_insn->mem_helper)) {
+    /*
+     * We could emit the clearing unconditionally and be done. However, this can
+     * be wasteful if for instance plugins don't track memory accesses, or if
+     * most TBs don't use helpers. Instead, emit the clearing iff the TB calls
+     * helpers that might access guest memory.
+     *
+     * Note: we do not reset plugin_tb->mem_helper here; a TB might have several
+     * exit points, and we want to emit the clearing from all of them.
+     */
+    if (!tcg_ctx->plugin_tb->mem_helper) {
         return;
     }
-    ptr = tcg_const_ptr(NULL);
-    tcg_gen_st_ptr(ptr, cpu_env, offsetof(CPUState, plugin_mem_cbs) -
-                                 offsetof(ArchCPU, env));
-    tcg_temp_free_ptr(ptr);
-    tcg_ctx->plugin_insn->mem_helper = false;
+    tcg_gen_st_ptr(tcg_constant_ptr(NULL), cpu_env,
+                   offsetof(CPUState, plugin_mem_cbs) - offsetof(ArchCPU, env));
 }
 
 static void plugin_gen_tb_udata(const struct qemu_plugin_tb *ptb,
@@ -711,74 +630,18 @@ static void plugin_gen_mem_inline(const struct qemu_plugin_tb *ptb,
     inject_inline_cb(cbs, begin_op, op_rw);
 }
 
-static void plugin_gen_enable_mem_helper(const struct qemu_plugin_tb *ptb,
+static void plugin_gen_enable_mem_helper(struct qemu_plugin_tb *ptb,
                                          TCGOp *begin_op, int insn_idx)
 {
     struct qemu_plugin_insn *insn = g_ptr_array_index(ptb->insns, insn_idx);
-    inject_mem_enable_helper(insn, begin_op);
+    inject_mem_enable_helper(ptb, insn, begin_op);
 }
 
-static void plugin_gen_disable_mem_helper(const struct qemu_plugin_tb *ptb,
+static void plugin_gen_disable_mem_helper(struct qemu_plugin_tb *ptb,
                                           TCGOp *begin_op, int insn_idx)
 {
     struct qemu_plugin_insn *insn = g_ptr_array_index(ptb->insns, insn_idx);
     inject_mem_disable_helper(insn, begin_op);
-}
-
-static void plugin_inject_cb(const struct qemu_plugin_tb *ptb, TCGOp *begin_op,
-                             int insn_idx)
-{
-    enum plugin_gen_from from = begin_op->args[0];
-    enum plugin_gen_cb type = begin_op->args[1];
-
-    switch (from) {
-    case PLUGIN_GEN_FROM_TB:
-        switch (type) {
-        case PLUGIN_GEN_CB_UDATA:
-            plugin_gen_tb_udata(ptb, begin_op);
-            return;
-        case PLUGIN_GEN_CB_INLINE:
-            plugin_gen_tb_inline(ptb, begin_op);
-            return;
-        default:
-            g_assert_not_reached();
-        }
-    case PLUGIN_GEN_FROM_INSN:
-        switch (type) {
-        case PLUGIN_GEN_CB_UDATA:
-            plugin_gen_insn_udata(ptb, begin_op, insn_idx);
-            return;
-        case PLUGIN_GEN_CB_INLINE:
-            plugin_gen_insn_inline(ptb, begin_op, insn_idx);
-            return;
-        case PLUGIN_GEN_ENABLE_MEM_HELPER:
-            plugin_gen_enable_mem_helper(ptb, begin_op, insn_idx);
-            return;
-        default:
-            g_assert_not_reached();
-        }
-    case PLUGIN_GEN_FROM_MEM:
-        switch (type) {
-        case PLUGIN_GEN_CB_MEM:
-            plugin_gen_mem_regular(ptb, begin_op, insn_idx);
-            return;
-        case PLUGIN_GEN_CB_INLINE:
-            plugin_gen_mem_inline(ptb, begin_op, insn_idx);
-            return;
-        default:
-            g_assert_not_reached();
-        }
-    case PLUGIN_GEN_AFTER_INSN:
-        switch (type) {
-        case PLUGIN_GEN_DISABLE_MEM_HELPER:
-            plugin_gen_disable_mem_helper(ptb, begin_op, insn_idx);
-            return;
-        default:
-            g_assert_not_reached();
-        }
-    default:
-        g_assert_not_reached();
-    }
 }
 
 /* #define DEBUG_PLUGIN_GEN_OPS */
@@ -835,44 +698,133 @@ static void pr_ops(void)
 #endif
 }
 
-static void plugin_gen_inject(const struct qemu_plugin_tb *plugin_tb)
+static void plugin_gen_inject(struct qemu_plugin_tb *plugin_tb)
 {
     TCGOp *op;
-    int insn_idx;
+    int insn_idx = -1;
 
     pr_ops();
-    insn_idx = -1;
-    QSIMPLEQ_FOREACH(op, &tcg_ctx->plugin_ops, plugin_link) {
-        enum plugin_gen_from from = op->args[0];
-        enum plugin_gen_cb type = op->args[1];
 
-        tcg_debug_assert(op->opc == INDEX_op_plugin_cb_start);
-        /* ENABLE_MEM_HELPER is the first callback of an instruction */
-        if (from == PLUGIN_GEN_FROM_INSN &&
-            type == PLUGIN_GEN_ENABLE_MEM_HELPER) {
+    QTAILQ_FOREACH(op, &tcg_ctx->ops, link) {
+        switch (op->opc) {
+        case INDEX_op_insn_start:
             insn_idx++;
+            break;
+        case INDEX_op_plugin_cb_start:
+        {
+            enum plugin_gen_from from = op->args[0];
+            enum plugin_gen_cb type = op->args[1];
+
+            switch (from) {
+            case PLUGIN_GEN_FROM_TB:
+            {
+                g_assert(insn_idx == -1);
+
+                switch (type) {
+                case PLUGIN_GEN_CB_UDATA:
+                    plugin_gen_tb_udata(plugin_tb, op);
+                    break;
+                case PLUGIN_GEN_CB_INLINE:
+                    plugin_gen_tb_inline(plugin_tb, op);
+                    break;
+                default:
+                    g_assert_not_reached();
+                }
+                break;
+            }
+            case PLUGIN_GEN_FROM_INSN:
+            {
+                g_assert(insn_idx >= 0);
+
+                switch (type) {
+                case PLUGIN_GEN_CB_UDATA:
+                    plugin_gen_insn_udata(plugin_tb, op, insn_idx);
+                    break;
+                case PLUGIN_GEN_CB_INLINE:
+                    plugin_gen_insn_inline(plugin_tb, op, insn_idx);
+                    break;
+                case PLUGIN_GEN_ENABLE_MEM_HELPER:
+                    plugin_gen_enable_mem_helper(plugin_tb, op, insn_idx);
+                    break;
+                default:
+                    g_assert_not_reached();
+                }
+                break;
+            }
+            case PLUGIN_GEN_FROM_MEM:
+            {
+                g_assert(insn_idx >= 0);
+
+                switch (type) {
+                case PLUGIN_GEN_CB_MEM:
+                    plugin_gen_mem_regular(plugin_tb, op, insn_idx);
+                    break;
+                case PLUGIN_GEN_CB_INLINE:
+                    plugin_gen_mem_inline(plugin_tb, op, insn_idx);
+                    break;
+                default:
+                    g_assert_not_reached();
+                }
+
+                break;
+            }
+            case PLUGIN_GEN_AFTER_INSN:
+            {
+                g_assert(insn_idx >= 0);
+
+                switch (type) {
+                case PLUGIN_GEN_DISABLE_MEM_HELPER:
+                    plugin_gen_disable_mem_helper(plugin_tb, op, insn_idx);
+                    break;
+                default:
+                    g_assert_not_reached();
+                }
+                break;
+            }
+            default:
+                g_assert_not_reached();
+            }
+            break;
         }
-        plugin_inject_cb(plugin_tb, op, insn_idx);
+        default:
+            /* plugins don't care about any other ops */
+            break;
+        }
     }
     pr_ops();
 }
 
-bool plugin_gen_tb_start(CPUState *cpu, const TranslationBlock *tb)
+bool plugin_gen_tb_start(CPUState *cpu, const DisasContextBase *db,
+                         bool mem_only)
 {
-    struct qemu_plugin_tb *ptb = tcg_ctx->plugin_tb;
     bool ret = false;
 
     if (test_bit(QEMU_PLUGIN_EV_VCPU_TB_TRANS, cpu->plugin_mask)) {
+        struct qemu_plugin_tb *ptb = tcg_ctx->plugin_tb;
+        int i;
+
+        /* reset callbacks */
+        for (i = 0; i < PLUGIN_N_CB_SUBTYPES; i++) {
+            if (ptb->cbs[i]) {
+                g_array_set_size(ptb->cbs[i], 0);
+            }
+        }
+        ptb->n = 0;
+
         ret = true;
 
-        QSIMPLEQ_INIT(&tcg_ctx->plugin_ops);
-        ptb->vaddr = tb->pc;
+        ptb->vaddr = db->pc_first;
         ptb->vaddr2 = -1;
-        get_page_addr_code_hostp(cpu->env_ptr, tb->pc, &ptb->haddr1);
+        ptb->haddr1 = db->host_addr[0];
         ptb->haddr2 = NULL;
+        ptb->mem_only = mem_only;
+        ptb->mem_helper = false;
 
         plugin_gen_empty_callback(PLUGIN_GEN_FROM_TB);
     }
+
+    tcg_ctx->plugin_insn = NULL;
+
     return ret;
 }
 
@@ -881,9 +833,8 @@ void plugin_gen_insn_start(CPUState *cpu, const DisasContextBase *db)
     struct qemu_plugin_tb *ptb = tcg_ctx->plugin_tb;
     struct qemu_plugin_insn *pinsn;
 
-    pinsn = qemu_plugin_tb_insn_get(ptb);
+    pinsn = qemu_plugin_tb_insn_get(ptb, db->pc_next);
     tcg_ctx->plugin_insn = pinsn;
-    pinsn->vaddr = db->pc_next;
     plugin_gen_empty_callback(PLUGIN_GEN_FROM_INSN);
 
     /*
@@ -891,16 +842,15 @@ void plugin_gen_insn_start(CPUState *cpu, const DisasContextBase *db)
      * Note that we skip this when haddr1 == NULL, e.g. when we're
      * fetching instructions from a region not backed by RAM.
      */
-    if (likely(ptb->haddr1 != NULL && ptb->vaddr2 == -1) &&
-        unlikely((db->pc_next & TARGET_PAGE_MASK) !=
-                 (db->pc_first & TARGET_PAGE_MASK))) {
-        get_page_addr_code_hostp(cpu->env_ptr, db->pc_next,
-                                 &ptb->haddr2);
-        ptb->vaddr2 = db->pc_next;
-    }
-    if (likely(ptb->vaddr2 == -1)) {
+    if (ptb->haddr1 == NULL) {
+        pinsn->haddr = NULL;
+    } else if (is_same_page(db, db->pc_next)) {
         pinsn->haddr = ptb->haddr1 + pinsn->vaddr - ptb->vaddr;
     } else {
+        if (ptb->vaddr2 == -1) {
+            ptb->vaddr2 = TARGET_PAGE_ALIGN(db->pc_first);
+            get_page_addr_code_hostp(cpu->env_ptr, ptb->vaddr2, &ptb->haddr2);
+        }
         pinsn->haddr = ptb->haddr2 + pinsn->vaddr - ptb->vaddr2;
     }
 }
@@ -910,23 +860,19 @@ void plugin_gen_insn_end(void)
     plugin_gen_empty_callback(PLUGIN_GEN_AFTER_INSN);
 }
 
+/*
+ * There are cases where we never get to finalise a translation - for
+ * example a page fault during translation. As a result we shouldn't
+ * do any clean-up here and make sure things are reset in
+ * plugin_gen_tb_start.
+ */
 void plugin_gen_tb_end(CPUState *cpu)
 {
     struct qemu_plugin_tb *ptb = tcg_ctx->plugin_tb;
-    int i;
 
     /* collect instrumentation requests */
     qemu_plugin_tb_trans_cb(cpu, ptb);
 
     /* inject the instrumentation at the appropriate places */
     plugin_gen_inject(ptb);
-
-    /* clean up */
-    for (i = 0; i < PLUGIN_N_CB_SUBTYPES; i++) {
-        if (ptb->cbs[i]) {
-            g_array_set_size(ptb->cbs[i], 0);
-        }
-    }
-    ptb->n = 0;
-    tcg_ctx->plugin_insn = NULL;
 }

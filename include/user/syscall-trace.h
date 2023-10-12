@@ -7,8 +7,12 @@
  * SPDX-License-Identifier: GPL-2.0-or-later
  */
 
-#ifndef _SYSCALL_TRACE_H_
-#define _SYSCALL_TRACE_H_
+#ifndef SYSCALL_TRACE_H
+#define SYSCALL_TRACE_H
+
+#include "exec/user/abitypes.h"
+#include "qemu/plugin.h"
+#include "trace/trace-root.h"
 
 /*
  * These helpers just provide a common place for the various
@@ -22,9 +26,6 @@ static inline void record_syscall_start(void *cpu, int num,
                                         abi_long arg5, abi_long arg6,
                                         abi_long arg7, abi_long arg8)
 {
-    trace_guest_user_syscall(cpu, num,
-                             arg1, arg2, arg3, arg4,
-                             arg5, arg6, arg7, arg8);
     qemu_plugin_vcpu_syscall(cpu, num,
                              arg1, arg2, arg3, arg4,
                              arg5, arg6, arg7, arg8);
@@ -32,9 +33,8 @@ static inline void record_syscall_start(void *cpu, int num,
 
 static inline void record_syscall_return(void *cpu, int num, abi_long ret)
 {
-    trace_guest_user_syscall_ret(cpu, num, ret);
     qemu_plugin_vcpu_syscall_ret(cpu, num, ret);
 }
 
 
-#endif /* _SYSCALL_TRACE_H_ */
+#endif /* SYSCALL_TRACE_H */

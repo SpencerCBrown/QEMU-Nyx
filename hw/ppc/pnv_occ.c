@@ -21,7 +21,8 @@
 #include "qapi/error.h"
 #include "qemu/log.h"
 #include "qemu/module.h"
-
+#include "hw/irq.h"
+#include "hw/qdev-properties.h"
 #include "hw/ppc/pnv.h"
 #include "hw/ppc/pnv_xscom.h"
 #include "hw/ppc/pnv_occ.h"
@@ -51,13 +52,12 @@
 static void pnv_occ_set_misc(PnvOCC *occ, uint64_t val)
 {
     bool irq_state;
-    PnvOCCClass *poc = PNV_OCC_GET_CLASS(occ);
 
     val &= 0xffff000000000000ull;
 
     occ->occmisc = val;
     irq_state = !!(val >> 63);
-    pnv_psi_irq_set(occ->psi, poc->psi_irq, irq_state);
+    qemu_set_irq(occ->psi_irq, irq_state);
 }
 
 static uint64_t pnv_occ_power8_xscom_read(void *opaque, hwaddr addr,
@@ -167,10 +167,7 @@ static void pnv_occ_power8_class_init(ObjectClass *klass, void *data)
     PnvOCCClass *poc = PNV_OCC_CLASS(klass);
 
     poc->xscom_size = PNV_XSCOM_OCC_SIZE;
-    poc->sram_size = PNV_OCC_COMMON_AREA_SIZE;
     poc->xscom_ops = &pnv_occ_power8_xscom_ops;
-    poc->sram_ops = &pnv_occ_sram_ops;
-    poc->psi_irq = PSIHB_IRQ_OCC;
 }
 
 static const TypeInfo pnv_occ_power8_type_info = {
@@ -238,12 +235,11 @@ static const MemoryRegionOps pnv_occ_power9_xscom_ops = {
 static void pnv_occ_power9_class_init(ObjectClass *klass, void *data)
 {
     PnvOCCClass *poc = PNV_OCC_CLASS(klass);
+    DeviceClass *dc = DEVICE_CLASS(klass);
 
+    dc->desc = "PowerNV OCC Controller (POWER9)";
     poc->xscom_size = PNV9_XSCOM_OCC_SIZE;
-    poc->sram_size = PNV9_OCC_COMMON_AREA_SIZE;
     poc->xscom_ops = &pnv_occ_power9_xscom_ops;
-    poc->sram_ops = &pnv_occ_sram_ops;
-    poc->psi_irq = PSIHB9_IRQ_OCC;
 }
 
 static const TypeInfo pnv_occ_power9_type_info = {
@@ -253,30 +249,36 @@ static const TypeInfo pnv_occ_power9_type_info = {
     .class_init    = pnv_occ_power9_class_init,
 };
 
+static void pnv_occ_power10_class_init(ObjectClass *klass, void *data)
+{
+    DeviceClass *dc = DEVICE_CLASS(klass);
+
+    dc->desc = "PowerNV OCC Controller (POWER10)";
+}
+
+static const TypeInfo pnv_occ_power10_type_info = {
+    .name          = TYPE_PNV10_OCC,
+    .parent        = TYPE_PNV9_OCC,
+    .class_init    = pnv_occ_power10_class_init,
+};
+
 static void pnv_occ_realize(DeviceState *dev, Error **errp)
 {
     PnvOCC *occ = PNV_OCC(dev);
     PnvOCCClass *poc = PNV_OCC_GET_CLASS(occ);
-    Object *obj;
-    Error *local_err = NULL;
 
     occ->occmisc = 0;
-
-    obj = object_property_get_link(OBJECT(dev), "psi", &local_err);
-    if (!obj) {
-        error_propagate(errp, local_err);
-        error_prepend(errp, "required link 'psi' not found: ");
-        return;
-    }
-    occ->psi = PNV_PSI(obj);
 
     /* XScom region for OCC registers */
     pnv_xscom_region_init(&occ->xscom_regs, OBJECT(dev), poc->xscom_ops,
                           occ, "xscom-occ", poc->xscom_size);
 
-    /* XScom region for OCC SRAM registers */
-    pnv_xscom_region_init(&occ->sram_regs, OBJECT(dev), poc->sram_ops,
-                          occ, "occ-common-area", poc->sram_size);
+    /* OCC common area mmio region for OCC SRAM registers */
+    memory_region_init_io(&occ->sram_regs, OBJECT(dev), &pnv_occ_sram_ops,
+                          occ, "occ-common-area",
+                          PNV_OCC_SENSOR_DATA_BLOCK_SIZE);
+
+    qdev_init_gpio_out(dev, &occ->psi_irq, 1);
 }
 
 static void pnv_occ_class_init(ObjectClass *klass, void *data)
@@ -285,6 +287,7 @@ static void pnv_occ_class_init(ObjectClass *klass, void *data)
 
     dc->realize = pnv_occ_realize;
     dc->desc = "PowerNV OCC Controller";
+    dc->user_creatable = false;
 }
 
 static const TypeInfo pnv_occ_type_info = {
@@ -301,6 +304,7 @@ static void pnv_occ_register_types(void)
     type_register_static(&pnv_occ_type_info);
     type_register_static(&pnv_occ_power8_type_info);
     type_register_static(&pnv_occ_power9_type_info);
+    type_register_static(&pnv_occ_power10_type_info);
 }
 
 type_init(pnv_occ_register_types);

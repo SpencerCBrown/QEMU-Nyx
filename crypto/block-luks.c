@@ -23,6 +23,7 @@
 #include "qemu/bswap.h"
 
 #include "block-luks.h"
+#include "block-luks-priv.h"
 
 #include "crypto/hash.h"
 #include "crypto/afsplit.h"
@@ -31,7 +32,7 @@
 #include "crypto/random.h"
 #include "qemu/uuid.h"
 
-#include "qemu/coroutine.h"
+#include "qemu/bitmap.h"
 
 /*
  * Reference for the LUKS format implemented here is
@@ -45,34 +46,6 @@
  */
 
 typedef struct QCryptoBlockLUKS QCryptoBlockLUKS;
-typedef struct QCryptoBlockLUKSHeader QCryptoBlockLUKSHeader;
-typedef struct QCryptoBlockLUKSKeySlot QCryptoBlockLUKSKeySlot;
-
-
-/* The following constants are all defined by the LUKS spec */
-#define QCRYPTO_BLOCK_LUKS_VERSION 1
-
-#define QCRYPTO_BLOCK_LUKS_MAGIC_LEN 6
-#define QCRYPTO_BLOCK_LUKS_CIPHER_NAME_LEN 32
-#define QCRYPTO_BLOCK_LUKS_CIPHER_MODE_LEN 32
-#define QCRYPTO_BLOCK_LUKS_HASH_SPEC_LEN 32
-#define QCRYPTO_BLOCK_LUKS_DIGEST_LEN 20
-#define QCRYPTO_BLOCK_LUKS_SALT_LEN 32
-#define QCRYPTO_BLOCK_LUKS_UUID_LEN 40
-#define QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS 8
-#define QCRYPTO_BLOCK_LUKS_STRIPES 4000
-#define QCRYPTO_BLOCK_LUKS_MIN_SLOT_KEY_ITERS 1000
-#define QCRYPTO_BLOCK_LUKS_MIN_MASTER_KEY_ITERS 1000
-#define QCRYPTO_BLOCK_LUKS_KEY_SLOT_OFFSET 4096
-
-#define QCRYPTO_BLOCK_LUKS_KEY_SLOT_DISABLED 0x0000DEAD
-#define QCRYPTO_BLOCK_LUKS_KEY_SLOT_ENABLED 0x00AC71F3
-
-#define QCRYPTO_BLOCK_LUKS_SECTOR_SIZE 512LL
-
-static const char qcrypto_block_luks_magic[QCRYPTO_BLOCK_LUKS_MAGIC_LEN] = {
-    'L', 'U', 'K', 'S', 0xBA, 0xBE
-};
 
 typedef struct QCryptoBlockLUKSNameMap QCryptoBlockLUKSNameMap;
 struct QCryptoBlockLUKSNameMap {
@@ -130,69 +103,7 @@ qcrypto_block_luks_cipher_name_map[] = {
     { "twofish", qcrypto_block_luks_cipher_size_map_twofish },
 };
 
-
-/*
- * This struct is written to disk in big-endian format,
- * but operated upon in native-endian format.
- */
-struct QCryptoBlockLUKSKeySlot {
-    /* state of keyslot, enabled/disable */
-    uint32_t active;
-    /* iterations for PBKDF2 */
-    uint32_t iterations;
-    /* salt for PBKDF2 */
-    uint8_t salt[QCRYPTO_BLOCK_LUKS_SALT_LEN];
-    /* start sector of key material */
-    uint32_t key_offset_sector;
-    /* number of anti-forensic stripes */
-    uint32_t stripes;
-};
-
 QEMU_BUILD_BUG_ON(sizeof(struct QCryptoBlockLUKSKeySlot) != 48);
-
-
-/*
- * This struct is written to disk in big-endian format,
- * but operated upon in native-endian format.
- */
-struct QCryptoBlockLUKSHeader {
-    /* 'L', 'U', 'K', 'S', '0xBA', '0xBE' */
-    char magic[QCRYPTO_BLOCK_LUKS_MAGIC_LEN];
-
-    /* LUKS version, currently 1 */
-    uint16_t version;
-
-    /* cipher name specification (aes, etc) */
-    char cipher_name[QCRYPTO_BLOCK_LUKS_CIPHER_NAME_LEN];
-
-    /* cipher mode specification (cbc-plain, xts-essiv:sha256, etc) */
-    char cipher_mode[QCRYPTO_BLOCK_LUKS_CIPHER_MODE_LEN];
-
-    /* hash specification (sha256, etc) */
-    char hash_spec[QCRYPTO_BLOCK_LUKS_HASH_SPEC_LEN];
-
-    /* start offset of the volume data (in 512 byte sectors) */
-    uint32_t payload_offset_sector;
-
-    /* Number of key bytes */
-    uint32_t master_key_len;
-
-    /* master key checksum after PBKDF2 */
-    uint8_t master_key_digest[QCRYPTO_BLOCK_LUKS_DIGEST_LEN];
-
-    /* salt for master key PBKDF2 */
-    uint8_t master_key_salt[QCRYPTO_BLOCK_LUKS_SALT_LEN];
-
-    /* iterations for master key PBKDF2 */
-    uint32_t master_key_iterations;
-
-    /* UUID of the partition in standard ASCII representation */
-    uint8_t uuid[QCRYPTO_BLOCK_LUKS_UUID_LEN];
-
-    /* key slots */
-    QCryptoBlockLUKSKeySlot key_slots[QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS];
-};
-
 QEMU_BUILD_BUG_ON(sizeof(struct QCryptoBlockLUKSHeader) != 592);
 
 
@@ -219,6 +130,9 @@ struct QCryptoBlockLUKS {
 
     /* Hash algorithm used in pbkdf2 function */
     QCryptoHashAlgorithm hash_alg;
+
+    /* Name of the secret that was used to open the image */
+    char *secret;
 };
 
 
@@ -247,7 +161,7 @@ static int qcrypto_block_luks_cipher_name_lookup(const char *name,
         }
     }
 
-    error_setg(errp, "Algorithm %s with key size %d bytes not supported",
+    error_setg(errp, "Algorithm '%s' with key size %d bytes not supported",
                name, key_bytes);
     return 0;
 }
@@ -283,7 +197,7 @@ static int qcrypto_block_luks_name_lookup(const char *name,
     int ret = qapi_enum_parse(map, name, -1, NULL);
 
     if (ret < 0) {
-        error_setg(errp, "%s %s not supported", type, name);
+        error_setg(errp, "%s '%s' not supported", type, name);
         return 0;
     }
     return ret;
@@ -433,6 +347,51 @@ qcrypto_block_luks_splitkeylen_sectors(const QCryptoBlockLUKS *luks,
     return ROUND_UP(splitkeylen_sectors, header_sectors);
 }
 
+
+void
+qcrypto_block_luks_to_disk_endian(QCryptoBlockLUKSHeader *hdr)
+{
+    size_t i;
+
+    /*
+     * Everything on disk uses Big Endian (tm), so flip header fields
+     * before writing them
+     */
+    cpu_to_be16s(&hdr->version);
+    cpu_to_be32s(&hdr->payload_offset_sector);
+    cpu_to_be32s(&hdr->master_key_len);
+    cpu_to_be32s(&hdr->master_key_iterations);
+
+    for (i = 0; i < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS; i++) {
+        cpu_to_be32s(&hdr->key_slots[i].active);
+        cpu_to_be32s(&hdr->key_slots[i].iterations);
+        cpu_to_be32s(&hdr->key_slots[i].key_offset_sector);
+        cpu_to_be32s(&hdr->key_slots[i].stripes);
+    }
+}
+
+void
+qcrypto_block_luks_from_disk_endian(QCryptoBlockLUKSHeader *hdr)
+{
+    size_t i;
+
+    /*
+     * The header is always stored in big-endian format, so
+     * convert everything to native
+     */
+    be16_to_cpus(&hdr->version);
+    be32_to_cpus(&hdr->payload_offset_sector);
+    be32_to_cpus(&hdr->master_key_len);
+    be32_to_cpus(&hdr->master_key_iterations);
+
+    for (i = 0; i < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS; i++) {
+        be32_to_cpus(&hdr->key_slots[i].active);
+        be32_to_cpus(&hdr->key_slots[i].iterations);
+        be32_to_cpus(&hdr->key_slots[i].key_offset_sector);
+        be32_to_cpus(&hdr->key_slots[i].stripes);
+    }
+}
+
 /*
  * Stores the main LUKS header, taking care of endianess
  */
@@ -444,28 +403,13 @@ qcrypto_block_luks_store_header(QCryptoBlock *block,
 {
     const QCryptoBlockLUKS *luks = block->opaque;
     Error *local_err = NULL;
-    size_t i;
     g_autofree QCryptoBlockLUKSHeader *hdr_copy = NULL;
 
     /* Create a copy of the header */
     hdr_copy = g_new0(QCryptoBlockLUKSHeader, 1);
     memcpy(hdr_copy, &luks->header, sizeof(QCryptoBlockLUKSHeader));
 
-    /*
-     * Everything on disk uses Big Endian (tm), so flip header fields
-     * before writing them
-     */
-    cpu_to_be16s(&hdr_copy->version);
-    cpu_to_be32s(&hdr_copy->payload_offset_sector);
-    cpu_to_be32s(&hdr_copy->master_key_len);
-    cpu_to_be32s(&hdr_copy->master_key_iterations);
-
-    for (i = 0; i < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS; i++) {
-        cpu_to_be32s(&hdr_copy->key_slots[i].active);
-        cpu_to_be32s(&hdr_copy->key_slots[i].iterations);
-        cpu_to_be32s(&hdr_copy->key_slots[i].key_offset_sector);
-        cpu_to_be32s(&hdr_copy->key_slots[i].stripes);
-    }
+    qcrypto_block_luks_to_disk_endian(hdr_copy);
 
     /* Write out the partition header and key slot headers */
     writefunc(block, 0, (const uint8_t *)hdr_copy, sizeof(*hdr_copy),
@@ -488,8 +432,7 @@ qcrypto_block_luks_load_header(QCryptoBlock *block,
                                 void *opaque,
                                 Error **errp)
 {
-    ssize_t rv;
-    size_t i;
+    int rv;
     QCryptoBlockLUKS *luks = block->opaque;
 
     /*
@@ -505,21 +448,7 @@ qcrypto_block_luks_load_header(QCryptoBlock *block,
         return rv;
     }
 
-    /*
-     * The header is always stored in big-endian format, so
-     * convert everything to native
-     */
-    be16_to_cpus(&luks->header.version);
-    be32_to_cpus(&luks->header.payload_offset_sector);
-    be32_to_cpus(&luks->header.master_key_len);
-    be32_to_cpus(&luks->header.master_key_iterations);
-
-    for (i = 0; i < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS; i++) {
-        be32_to_cpus(&luks->header.key_slots[i].active);
-        be32_to_cpus(&luks->header.key_slots[i].iterations);
-        be32_to_cpus(&luks->header.key_slots[i].key_offset_sector);
-        be32_to_cpus(&luks->header.key_slots[i].stripes);
-    }
+    qcrypto_block_luks_from_disk_endian(&luks->header);
 
     return 0;
 }
@@ -547,6 +476,36 @@ qcrypto_block_luks_check_header(const QCryptoBlockLUKS *luks, Error **errp)
         return -1;
     }
 
+    if (!memchr(luks->header.cipher_name, '\0',
+                sizeof(luks->header.cipher_name))) {
+        error_setg(errp, "LUKS header cipher name is not NUL terminated");
+        return -1;
+    }
+
+    if (!memchr(luks->header.cipher_mode, '\0',
+                sizeof(luks->header.cipher_mode))) {
+        error_setg(errp, "LUKS header cipher mode is not NUL terminated");
+        return -1;
+    }
+
+    if (!memchr(luks->header.hash_spec, '\0',
+                sizeof(luks->header.hash_spec))) {
+        error_setg(errp, "LUKS header hash spec is not NUL terminated");
+        return -1;
+    }
+
+    if (luks->header.payload_offset_sector <
+        DIV_ROUND_UP(QCRYPTO_BLOCK_LUKS_KEY_SLOT_OFFSET,
+                     QCRYPTO_BLOCK_LUKS_SECTOR_SIZE)) {
+        error_setg(errp, "LUKS payload is overlapping with the header");
+        return -1;
+    }
+
+    if (luks->header.master_key_iterations == 0) {
+        error_setg(errp, "LUKS key iteration count is zero");
+        return -1;
+    }
+
     /* Check all keyslots for corruption  */
     for (i = 0 ; i < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS ; i++) {
 
@@ -557,8 +516,9 @@ qcrypto_block_luks_check_header(const QCryptoBlockLUKS *luks, Error **errp)
                                                    header_sectors,
                                                    slot1->stripes);
 
-        if (slot1->stripes == 0) {
-            error_setg(errp, "Keyslot %zu is corrupted (stripes == 0)", i);
+        if (slot1->stripes != QCRYPTO_BLOCK_LUKS_STRIPES) {
+            error_setg(errp, "Keyslot %zu is corrupted (stripes %d != %d)",
+                       i, slot1->stripes, QCRYPTO_BLOCK_LUKS_STRIPES);
             return -1;
         }
 
@@ -566,6 +526,20 @@ qcrypto_block_luks_check_header(const QCryptoBlockLUKS *luks, Error **errp)
             slot1->active != QCRYPTO_BLOCK_LUKS_KEY_SLOT_ENABLED) {
             error_setg(errp,
                        "Keyslot %zu state (active/disable) is corrupted", i);
+            return -1;
+        }
+
+        if (slot1->active == QCRYPTO_BLOCK_LUKS_KEY_SLOT_ENABLED &&
+            slot1->iterations == 0) {
+            error_setg(errp, "Keyslot %zu iteration count is zero", i);
+            return -1;
+        }
+
+        if (start1 < DIV_ROUND_UP(QCRYPTO_BLOCK_LUKS_KEY_SLOT_OFFSET,
+                                  QCRYPTO_BLOCK_LUKS_SECTOR_SIZE)) {
+            error_setg(errp,
+                       "Keyslot %zu is overlapping with the LUKS header",
+                       i);
             return -1;
         }
 
@@ -617,7 +591,7 @@ qcrypto_block_luks_parse_header(QCryptoBlockLUKS *luks, Error **errp)
      */
     ivgen_name = strchr(cipher_mode, '-');
     if (!ivgen_name) {
-        error_setg(errp, "Unexpected cipher mode string format %s",
+        error_setg(errp, "Unexpected cipher mode string format '%s'",
                    luks->header.cipher_mode);
         return -1;
     }
@@ -720,7 +694,7 @@ qcrypto_block_luks_store_key(QCryptoBlock *block,
                              Error **errp)
 {
     QCryptoBlockLUKS *luks = block->opaque;
-    QCryptoBlockLUKSKeySlot *slot = &luks->header.key_slots[slot_idx];
+    QCryptoBlockLUKSKeySlot *slot;
     g_autofree uint8_t *splitkey = NULL;
     size_t splitkeylen;
     g_autofree uint8_t *slotkey = NULL;
@@ -730,13 +704,15 @@ qcrypto_block_luks_store_key(QCryptoBlock *block,
     uint64_t iters;
     int ret = -1;
 
+    assert(slot_idx < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS);
+    slot = &luks->header.key_slots[slot_idx];
+    splitkeylen = luks->header.master_key_len * slot->stripes;
+
     if (qcrypto_random_bytes(slot->salt,
                              QCRYPTO_BLOCK_LUKS_SALT_LEN,
                              errp) < 0) {
         goto cleanup;
     }
-
-    splitkeylen = luks->header.master_key_len * slot->stripes;
 
     /*
      * Determine how many iterations are required to
@@ -847,7 +823,7 @@ qcrypto_block_luks_store_key(QCryptoBlock *block,
                   QCRYPTO_BLOCK_LUKS_SECTOR_SIZE,
                   splitkey, splitkeylen,
                   opaque,
-                  errp) != splitkeylen) {
+                  errp) < 0) {
         goto cleanup;
     }
 
@@ -890,16 +866,18 @@ qcrypto_block_luks_load_key(QCryptoBlock *block,
                             Error **errp)
 {
     QCryptoBlockLUKS *luks = block->opaque;
-    const QCryptoBlockLUKSKeySlot *slot = &luks->header.key_slots[slot_idx];
+    const QCryptoBlockLUKSKeySlot *slot;
     g_autofree uint8_t *splitkey = NULL;
     size_t splitkeylen;
     g_autofree uint8_t *possiblekey = NULL;
-    ssize_t rv;
+    int rv;
     g_autoptr(QCryptoCipher) cipher = NULL;
     uint8_t keydigest[QCRYPTO_BLOCK_LUKS_DIGEST_LEN];
     g_autoptr(QCryptoIVGen) ivgen = NULL;
     size_t niv;
 
+    assert(slot_idx < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS);
+    slot = &luks->header.key_slots[slot_idx];
     if (slot->active != QCRYPTO_BLOCK_LUKS_KEY_SLOT_ENABLED) {
         return 0;
     }
@@ -1069,6 +1047,126 @@ qcrypto_block_luks_find_key(QCryptoBlock *block,
     return -1;
 }
 
+/*
+ * Returns true if a slot i is marked as active
+ * (contains encrypted copy of the master key)
+ */
+static bool
+qcrypto_block_luks_slot_active(const QCryptoBlockLUKS *luks,
+                               unsigned int slot_idx)
+{
+    uint32_t val;
+
+    assert(slot_idx < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS);
+    val = luks->header.key_slots[slot_idx].active;
+    return val == QCRYPTO_BLOCK_LUKS_KEY_SLOT_ENABLED;
+}
+
+/*
+ * Returns the number of slots that are marked as active
+ * (slots that contain encrypted copy of the master key)
+ */
+static unsigned int
+qcrypto_block_luks_count_active_slots(const QCryptoBlockLUKS *luks)
+{
+    size_t i = 0;
+    unsigned int ret = 0;
+
+    for (i = 0; i < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS; i++) {
+        if (qcrypto_block_luks_slot_active(luks, i)) {
+            ret++;
+        }
+    }
+    return ret;
+}
+
+/*
+ * Finds first key slot which is not active
+ * Returns the key slot index, or -1 if it doesn't exist
+ */
+static int
+qcrypto_block_luks_find_free_keyslot(const QCryptoBlockLUKS *luks)
+{
+    size_t i;
+
+    for (i = 0; i < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS; i++) {
+        if (!qcrypto_block_luks_slot_active(luks, i)) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+/*
+ * Erases an keyslot given its index
+ * Returns:
+ *    0 if the keyslot was erased successfully
+ *   -1 if a error occurred while erasing the keyslot
+ *
+ */
+static int
+qcrypto_block_luks_erase_key(QCryptoBlock *block,
+                             unsigned int slot_idx,
+                             QCryptoBlockWriteFunc writefunc,
+                             void *opaque,
+                             Error **errp)
+{
+    QCryptoBlockLUKS *luks = block->opaque;
+    QCryptoBlockLUKSKeySlot *slot;
+    g_autofree uint8_t *garbagesplitkey = NULL;
+    size_t splitkeylen;
+    size_t i;
+    Error *local_err = NULL;
+    int ret;
+
+    assert(slot_idx < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS);
+    slot = &luks->header.key_slots[slot_idx];
+
+    splitkeylen = luks->header.master_key_len * slot->stripes;
+    assert(splitkeylen > 0);
+
+    garbagesplitkey = g_new0(uint8_t, splitkeylen);
+
+    /* Reset the key slot header */
+    memset(slot->salt, 0, QCRYPTO_BLOCK_LUKS_SALT_LEN);
+    slot->iterations = 0;
+    slot->active = QCRYPTO_BLOCK_LUKS_KEY_SLOT_DISABLED;
+
+    ret = qcrypto_block_luks_store_header(block, writefunc,
+                                          opaque, &local_err);
+
+    if (ret < 0) {
+        error_propagate(errp, local_err);
+    }
+    /*
+     * Now try to erase the key material, even if the header
+     * update failed
+     */
+    for (i = 0; i < QCRYPTO_BLOCK_LUKS_ERASE_ITERATIONS; i++) {
+        if (qcrypto_random_bytes(garbagesplitkey,
+                                 splitkeylen, &local_err) < 0) {
+            /*
+             * If we failed to get the random data, still write
+             * at least zeros to the key slot at least once
+             */
+            error_propagate(errp, local_err);
+
+            if (i > 0) {
+                return -1;
+            }
+        }
+        if (writefunc(block,
+                      slot->key_offset_sector * QCRYPTO_BLOCK_LUKS_SECTOR_SIZE,
+                      garbagesplitkey,
+                      splitkeylen,
+                      opaque,
+                      &local_err) < 0) {
+            error_propagate(errp, local_err);
+            return -1;
+        }
+    }
+    return ret;
+}
 
 static int
 qcrypto_block_luks_open(QCryptoBlock *block,
@@ -1099,6 +1197,7 @@ qcrypto_block_luks_open(QCryptoBlock *block,
 
     luks = g_new0(QCryptoBlockLUKS, 1);
     block->opaque = luks;
+    luks->secret = g_strdup(options->u.luks.key_secret);
 
     if (qcrypto_block_luks_load_header(block, readfunc, opaque, errp) < 0) {
         goto fail;
@@ -1164,6 +1263,7 @@ qcrypto_block_luks_open(QCryptoBlock *block,
  fail:
     qcrypto_block_free_cipher(block);
     qcrypto_ivgen_free(block->ivgen);
+    g_free(luks->secret);
     g_free(luks);
     return -1;
 }
@@ -1204,7 +1304,7 @@ qcrypto_block_luks_create(QCryptoBlock *block,
 
     memcpy(&luks_opts, &options->u.luks, sizeof(luks_opts));
     if (!luks_opts.has_iter_time) {
-        luks_opts.iter_time = 2000;
+        luks_opts.iter_time = QCRYPTO_BLOCK_LUKS_DEFAULT_ITER_TIME_MS;
     }
     if (!luks_opts.has_cipher_alg) {
         luks_opts.cipher_alg = QCRYPTO_CIPHER_ALG_AES_256;
@@ -1244,6 +1344,8 @@ qcrypto_block_luks_create(QCryptoBlock *block,
                    optprefix ? optprefix : "");
         goto error;
     }
+    luks->secret = g_strdup(options->u.luks.key_secret);
+
     password = qcrypto_secret_lookup_as_utf8(luks_opts.key_secret, errp);
     if (!password) {
         goto error;
@@ -1471,10 +1573,278 @@ qcrypto_block_luks_create(QCryptoBlock *block,
     qcrypto_block_free_cipher(block);
     qcrypto_ivgen_free(block->ivgen);
 
+    g_free(luks->secret);
     g_free(luks);
     return -1;
 }
 
+static int
+qcrypto_block_luks_amend_add_keyslot(QCryptoBlock *block,
+                                     QCryptoBlockReadFunc readfunc,
+                                     QCryptoBlockWriteFunc writefunc,
+                                     void *opaque,
+                                     QCryptoBlockAmendOptionsLUKS *opts_luks,
+                                     bool force,
+                                     Error **errp)
+{
+    QCryptoBlockLUKS *luks = block->opaque;
+    uint64_t iter_time = opts_luks->has_iter_time ?
+                         opts_luks->iter_time :
+                         QCRYPTO_BLOCK_LUKS_DEFAULT_ITER_TIME_MS;
+    int keyslot;
+    g_autofree char *old_password = NULL;
+    g_autofree char *new_password = NULL;
+    g_autofree uint8_t *master_key = NULL;
+
+    char *secret = opts_luks->secret ?: luks->secret;
+
+    if (!opts_luks->new_secret) {
+        error_setg(errp, "'new-secret' is required to activate a keyslot");
+        return -1;
+    }
+    if (opts_luks->old_secret) {
+        error_setg(errp,
+                   "'old-secret' must not be given when activating keyslots");
+        return -1;
+    }
+
+    if (opts_luks->has_keyslot) {
+        keyslot = opts_luks->keyslot;
+        if (keyslot < 0 || keyslot >= QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS) {
+            error_setg(errp,
+                       "Invalid keyslot %u specified, must be between 0 and %u",
+                       keyslot, QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS - 1);
+            return -1;
+        }
+    } else {
+        keyslot = qcrypto_block_luks_find_free_keyslot(luks);
+        if (keyslot == -1) {
+            error_setg(errp,
+                       "Can't add a keyslot - all keyslots are in use");
+            return -1;
+        }
+    }
+
+    if (!force && qcrypto_block_luks_slot_active(luks, keyslot)) {
+        error_setg(errp,
+                   "Refusing to overwrite active keyslot %i - "
+                   "please erase it first",
+                   keyslot);
+        return -1;
+    }
+
+    /* Locate the password that will be used to retrieve the master key */
+    old_password = qcrypto_secret_lookup_as_utf8(secret, errp);
+    if (!old_password) {
+        return -1;
+    }
+
+    /* Retrieve the master key */
+    master_key = g_new0(uint8_t, luks->header.master_key_len);
+
+    if (qcrypto_block_luks_find_key(block, old_password, master_key,
+                                    readfunc, opaque, errp) < 0) {
+        error_append_hint(errp, "Failed to retrieve the master key");
+        return -1;
+    }
+
+    /* Locate the new password*/
+    new_password = qcrypto_secret_lookup_as_utf8(opts_luks->new_secret, errp);
+    if (!new_password) {
+        return -1;
+    }
+
+    /* Now set the new keyslots */
+    if (qcrypto_block_luks_store_key(block, keyslot, new_password, master_key,
+                                     iter_time, writefunc, opaque, errp)) {
+        error_append_hint(errp, "Failed to write to keyslot %i", keyslot);
+        return -1;
+    }
+    return 0;
+}
+
+static int
+qcrypto_block_luks_amend_erase_keyslots(QCryptoBlock *block,
+                                        QCryptoBlockReadFunc readfunc,
+                                        QCryptoBlockWriteFunc writefunc,
+                                        void *opaque,
+                                        QCryptoBlockAmendOptionsLUKS *opts_luks,
+                                        bool force,
+                                        Error **errp)
+{
+    QCryptoBlockLUKS *luks = block->opaque;
+    g_autofree uint8_t *tmpkey = NULL;
+    g_autofree char *old_password = NULL;
+
+    if (opts_luks->new_secret) {
+        error_setg(errp,
+                   "'new-secret' must not be given when erasing keyslots");
+        return -1;
+    }
+    if (opts_luks->has_iter_time) {
+        error_setg(errp,
+                   "'iter-time' must not be given when erasing keyslots");
+        return -1;
+    }
+    if (opts_luks->secret) {
+        error_setg(errp,
+                   "'secret' must not be given when erasing keyslots");
+        return -1;
+    }
+
+    /* Load the old password if given */
+    if (opts_luks->old_secret) {
+        old_password = qcrypto_secret_lookup_as_utf8(opts_luks->old_secret,
+                                                     errp);
+        if (!old_password) {
+            return -1;
+        }
+
+        /*
+         * Allocate a temporary key buffer that we will need when
+         * checking if slot matches the given old password
+         */
+        tmpkey = g_new0(uint8_t, luks->header.master_key_len);
+    }
+
+    /* Erase an explicitly given keyslot */
+    if (opts_luks->has_keyslot) {
+        int keyslot = opts_luks->keyslot;
+
+        if (keyslot < 0 || keyslot >= QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS) {
+            error_setg(errp,
+                       "Invalid keyslot %i specified, must be between 0 and %i",
+                       keyslot, QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS - 1);
+            return -1;
+        }
+
+        if (opts_luks->old_secret) {
+            int rv = qcrypto_block_luks_load_key(block,
+                                                 keyslot,
+                                                 old_password,
+                                                 tmpkey,
+                                                 readfunc,
+                                                 opaque,
+                                                 errp);
+            if (rv == -1) {
+                return -1;
+            } else if (rv == 0) {
+                error_setg(errp,
+                           "Given keyslot %i doesn't contain the given "
+                           "old password for erase operation",
+                           keyslot);
+                return -1;
+            }
+        }
+
+        if (!force && !qcrypto_block_luks_slot_active(luks, keyslot)) {
+            error_setg(errp,
+                       "Given keyslot %i is already erased (inactive) ",
+                       keyslot);
+            return -1;
+        }
+
+        if (!force && qcrypto_block_luks_count_active_slots(luks) == 1) {
+            error_setg(errp,
+                       "Attempt to erase the only active keyslot %i "
+                       "which will erase all the data in the image "
+                       "irreversibly - refusing operation",
+                       keyslot);
+            return -1;
+        }
+
+        if (qcrypto_block_luks_erase_key(block, keyslot,
+                                         writefunc, opaque, errp)) {
+            error_append_hint(errp, "Failed to erase keyslot %i", keyslot);
+            return -1;
+        }
+
+    /* Erase all keyslots that match the given old password */
+    } else if (opts_luks->old_secret) {
+
+        unsigned long slots_to_erase_bitmap = 0;
+        size_t i;
+        int slot_count;
+
+        assert(QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS <=
+               sizeof(slots_to_erase_bitmap) * 8);
+
+        for (i = 0; i < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS; i++) {
+            int rv = qcrypto_block_luks_load_key(block,
+                                                 i,
+                                                 old_password,
+                                                 tmpkey,
+                                                 readfunc,
+                                                 opaque,
+                                                 errp);
+            if (rv == -1) {
+                return -1;
+            } else if (rv == 1) {
+                bitmap_set(&slots_to_erase_bitmap, i, 1);
+            }
+        }
+
+        slot_count = bitmap_count_one(&slots_to_erase_bitmap,
+                                      QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS);
+        if (slot_count == 0) {
+            error_setg(errp,
+                       "No keyslots match given (old) password for erase operation");
+            return -1;
+        }
+
+        if (!force &&
+            slot_count == qcrypto_block_luks_count_active_slots(luks)) {
+            error_setg(errp,
+                       "All the active keyslots match the (old) password that "
+                       "was given and erasing them will erase all the data in "
+                       "the image irreversibly - refusing operation");
+            return -1;
+        }
+
+        /* Now apply the update */
+        for (i = 0; i < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS; i++) {
+            if (!test_bit(i, &slots_to_erase_bitmap)) {
+                continue;
+            }
+            if (qcrypto_block_luks_erase_key(block, i, writefunc,
+                opaque, errp)) {
+                error_append_hint(errp, "Failed to erase keyslot %zu", i);
+                return -1;
+            }
+        }
+    } else {
+        error_setg(errp,
+                   "To erase keyslot(s), either explicit keyslot index "
+                   "or the password currently contained in them must be given");
+        return -1;
+    }
+    return 0;
+}
+
+static int
+qcrypto_block_luks_amend_options(QCryptoBlock *block,
+                                 QCryptoBlockReadFunc readfunc,
+                                 QCryptoBlockWriteFunc writefunc,
+                                 void *opaque,
+                                 QCryptoBlockAmendOptions *options,
+                                 bool force,
+                                 Error **errp)
+{
+    QCryptoBlockAmendOptionsLUKS *opts_luks = &options->u.luks;
+
+    switch (opts_luks->state) {
+    case Q_CRYPTO_BLOCKLUKS_KEYSLOT_STATE_ACTIVE:
+        return qcrypto_block_luks_amend_add_keyslot(block, readfunc,
+                                                    writefunc, opaque,
+                                                    opts_luks, force, errp);
+    case Q_CRYPTO_BLOCKLUKS_KEYSLOT_STATE_INACTIVE:
+        return qcrypto_block_luks_amend_erase_keyslots(block, readfunc,
+                                                       writefunc, opaque,
+                                                       opts_luks, force, errp);
+    default:
+        g_assert_not_reached();
+    }
+}
 
 static int qcrypto_block_luks_get_info(QCryptoBlock *block,
                                        QCryptoBlockInfo *info,
@@ -1482,7 +1852,7 @@ static int qcrypto_block_luks_get_info(QCryptoBlock *block,
 {
     QCryptoBlockLUKS *luks = block->opaque;
     QCryptoBlockInfoLUKSSlot *slot;
-    QCryptoBlockInfoLUKSSlotList *slots = NULL, **prev = &info->u.luks.slots;
+    QCryptoBlockInfoLUKSSlotList **tail = &info->u.luks.slots;
     size_t i;
 
     info->u.luks.cipher_alg = luks->cipher_alg;
@@ -1499,10 +1869,7 @@ static int qcrypto_block_luks_get_info(QCryptoBlock *block,
                                   sizeof(luks->header.uuid));
 
     for (i = 0; i < QCRYPTO_BLOCK_LUKS_NUM_KEY_SLOTS; i++) {
-        slots = g_new0(QCryptoBlockInfoLUKSSlotList, 1);
-        *prev = slots;
-
-        slots->value = slot = g_new0(QCryptoBlockInfoLUKSSlot, 1);
+        slot = g_new0(QCryptoBlockInfoLUKSSlot, 1);
         slot->active = luks->header.key_slots[i].active ==
             QCRYPTO_BLOCK_LUKS_KEY_SLOT_ENABLED;
         slot->key_offset = luks->header.key_slots[i].key_offset_sector
@@ -1514,7 +1881,7 @@ static int qcrypto_block_luks_get_info(QCryptoBlock *block,
             slot->stripes = luks->header.key_slots[i].stripes;
         }
 
-        prev = &slots->next;
+        QAPI_LIST_APPEND(tail, slot);
     }
 
     return 0;
@@ -1523,7 +1890,11 @@ static int qcrypto_block_luks_get_info(QCryptoBlock *block,
 
 static void qcrypto_block_luks_cleanup(QCryptoBlock *block)
 {
-    g_free(block->opaque);
+    QCryptoBlockLUKS *luks = block->opaque;
+    if (luks) {
+        g_free(luks->secret);
+        g_free(luks);
+    }
 }
 
 
@@ -1560,6 +1931,7 @@ qcrypto_block_luks_encrypt(QCryptoBlock *block,
 const QCryptoBlockDriver qcrypto_block_driver_luks = {
     .open = qcrypto_block_luks_open,
     .create = qcrypto_block_luks_create,
+    .amend = qcrypto_block_luks_amend_options,
     .get_info = qcrypto_block_luks_get_info,
     .cleanup = qcrypto_block_luks_cleanup,
     .decrypt = qcrypto_block_luks_decrypt,

@@ -14,18 +14,17 @@
 #include "migration.h"
 #include "migration/vmstate.h"
 #include "savevm.h"
+#include "qapi/qmp/json-writer.h"
 #include "qemu-file.h"
 #include "qemu/bitops.h"
 #include "qemu/error-report.h"
 #include "trace.h"
-#include "qjson.h"
 
 static int vmstate_subsection_save(QEMUFile *f, const VMStateDescription *vmsd,
-                                   void *opaque, QJSON *vmdesc);
-
+                                   void *opaque, JSONWriter *vmdesc);
 #ifndef QEMU_NYX
 static int vmstate_subsection_load(QEMUFile *f, const VMStateDescription *vmsd,
-                                   void *opaque);
+                                   void *opaque, JSONWriter *vmdesc);
 #else
 int vmstate_subsection_load(QEMUFile *f, const VMStateDescription *vmsd,
                                    void *opaque);
@@ -47,13 +46,13 @@ int vmstate_n_elems(void *opaque, const VMStateField *field)
     if (field->flags & VMS_ARRAY) {
         n_elems = field->num;
     } else if (field->flags & VMS_VARRAY_INT32) {
-        n_elems = *(int32_t *)(opaque+field->num_offset);
+        n_elems = *(int32_t *)(opaque + field->num_offset);
     } else if (field->flags & VMS_VARRAY_UINT32) {
-        n_elems = *(uint32_t *)(opaque+field->num_offset);
+        n_elems = *(uint32_t *)(opaque + field->num_offset);
     } else if (field->flags & VMS_VARRAY_UINT16) {
-        n_elems = *(uint16_t *)(opaque+field->num_offset);
+        n_elems = *(uint16_t *)(opaque + field->num_offset);
     } else if (field->flags & VMS_VARRAY_UINT8) {
-        n_elems = *(uint8_t *)(opaque+field->num_offset);
+        n_elems = *(uint8_t *)(opaque + field->num_offset);
     }
 
     if (field->flags & VMS_MULTIPLY_ELEMENTS) {
@@ -73,7 +72,7 @@ int vmstate_size(void *opaque, const VMStateField *field)
     int size = field->size;
 
     if (field->flags & VMS_VBUFFER) {
-        size = *(int32_t *)(opaque+field->size_offset);
+        size = *(int32_t *)(opaque + field->size_offset);
         if (field->flags & VMS_MULTIPLY) {
             size *= field->size;
         }
@@ -114,12 +113,6 @@ int vmstate_load_state(QEMUFile *f, const VMStateDescription *vmsd,
         return -EINVAL;
     }
     if  (version_id < vmsd->minimum_version_id) {
-        if (vmsd->load_state_old &&
-            version_id >= vmsd->minimum_version_id_old) {
-            ret = vmsd->load_state_old(f, opaque, version_id);
-            trace_vmstate_load_state_end(vmsd->name, "old path", ret);
-            return ret;
-        }
         error_report("%s: incoming version_id %d is too old "
                      "for local minimum version_id  %d",
                      vmsd->name, version_id, vmsd->minimum_version_id);
@@ -184,6 +177,7 @@ int vmstate_load_state(QEMUFile *f, const VMStateDescription *vmsd,
         }
         field++;
     }
+    assert(field->flags == VMS_END);
     ret = vmstate_subsection_load(f, vmsd, opaque);
     if (ret != 0) {
         return ret;
@@ -273,7 +267,8 @@ static bool vmsd_can_compress(const VMStateField *field)
     return true;
 }
 
-static void vmsd_desc_field_start(const VMStateDescription *vmsd, QJSON *vmdesc,
+static void vmsd_desc_field_start(const VMStateDescription *vmsd,
+                                  JSONWriter *vmdesc,
                                   const VMStateField *field, int i, int max)
 {
     char *name, *old_name;
@@ -294,25 +289,26 @@ static void vmsd_desc_field_start(const VMStateDescription *vmsd, QJSON *vmdesc,
         g_free(old_name);
     }
 
-    json_start_object(vmdesc, NULL);
-    json_prop_str(vmdesc, "name", name);
+    json_writer_start_object(vmdesc, NULL);
+    json_writer_str(vmdesc, "name", name);
     if (is_array) {
         if (can_compress) {
-            json_prop_int(vmdesc, "array_len", max);
+            json_writer_int64(vmdesc, "array_len", max);
         } else {
-            json_prop_int(vmdesc, "index", i);
+            json_writer_int64(vmdesc, "index", i);
         }
     }
-    json_prop_str(vmdesc, "type", vmfield_get_type_name(field));
+    json_writer_str(vmdesc, "type", vmfield_get_type_name(field));
 
     if (field->flags & VMS_STRUCT) {
-        json_start_object(vmdesc, "struct");
+        json_writer_start_object(vmdesc, "struct");
     }
 
     g_free(name);
 }
 
-static void vmsd_desc_field_end(const VMStateDescription *vmsd, QJSON *vmdesc,
+static void vmsd_desc_field_end(const VMStateDescription *vmsd,
+                                JSONWriter *vmdesc,
                                 const VMStateField *field, size_t size, int i)
 {
     if (!vmdesc) {
@@ -321,11 +317,11 @@ static void vmsd_desc_field_end(const VMStateDescription *vmsd, QJSON *vmdesc,
 
     if (field->flags & VMS_STRUCT) {
         /* We printed a struct in between, close its child object */
-        json_end_object(vmdesc);
+        json_writer_end_object(vmdesc);
     }
 
-    json_prop_int(vmdesc, "size", size);
-    json_end_object(vmdesc);
+    json_writer_int64(vmdesc, "size", size);
+    json_writer_end_object(vmdesc);
 }
 
 
@@ -340,13 +336,13 @@ bool vmstate_save_needed(const VMStateDescription *vmsd, void *opaque)
 
 
 int vmstate_save_state(QEMUFile *f, const VMStateDescription *vmsd,
-                       void *opaque, QJSON *vmdesc_id)
+                       void *opaque, JSONWriter *vmdesc_id)
 {
     return vmstate_save_state_v(f, vmsd, opaque, vmdesc_id, vmsd->version_id);
 }
 
 int vmstate_save_state_v(QEMUFile *f, const VMStateDescription *vmsd,
-                         void *opaque, QJSON *vmdesc, int version_id)
+                         void *opaque, JSONWriter *vmdesc, int version_id)
 {
     int ret = 0;
     const VMStateField *field = vmsd->fields;
@@ -363,9 +359,9 @@ int vmstate_save_state_v(QEMUFile *f, const VMStateDescription *vmsd,
     }
 
     if (vmdesc) {
-        json_prop_str(vmdesc, "vmsd_name", vmsd->name);
-        json_prop_int(vmdesc, "version", version_id);
-        json_start_array(vmdesc, "fields");
+        json_writer_str(vmdesc, "vmsd_name", vmsd->name);
+        json_writer_int64(vmdesc, "version", version_id);
+        json_writer_start_array(vmdesc, "fields");
     }
 
     while (field->name) {
@@ -376,8 +372,8 @@ int vmstate_save_state_v(QEMUFile *f, const VMStateDescription *vmsd,
             void *first_elem = opaque + field->offset;
             int i, n_elems = vmstate_n_elems(opaque, field);
             int size = vmstate_size(opaque, field);
-            int64_t old_offset, written_bytes;
-            QJSON *vmdesc_loop = vmdesc;
+            uint64_t old_offset, written_bytes;
+            JSONWriter *vmdesc_loop = vmdesc;
 
             trace_vmstate_save_state_loop(vmsd->name, field->name, n_elems);
             if (field->flags & VMS_POINTER) {
@@ -386,10 +382,9 @@ int vmstate_save_state_v(QEMUFile *f, const VMStateDescription *vmsd,
             }
             for (i = 0; i < n_elems; i++) {
                 void *curr_elem = first_elem + size * i;
-                ret = 0;
 
                 vmsd_desc_field_start(vmsd, vmdesc_loop, field, i, n_elems);
-                old_offset = qemu_ftell_fast(f);
+                old_offset = qemu_file_transferred_noflush(f);
                 if (field->flags & VMS_ARRAY_OF_POINTER) {
                     assert(curr_elem);
                     curr_elem = *(void **)curr_elem;
@@ -419,7 +414,7 @@ int vmstate_save_state_v(QEMUFile *f, const VMStateDescription *vmsd,
                     return ret;
                 }
 
-                written_bytes = qemu_ftell_fast(f) - old_offset;
+                written_bytes = qemu_file_transferred_noflush(f) - old_offset;
                 vmsd_desc_field_end(vmsd, vmdesc_loop, field, written_bytes, i);
 
                 /* Compressed arrays only care about the first element */
@@ -436,9 +431,10 @@ int vmstate_save_state_v(QEMUFile *f, const VMStateDescription *vmsd,
         }
         field++;
     }
+    assert(field->flags == VMS_END);
 
     if (vmdesc) {
-        json_end_array(vmdesc);
+        json_writer_end_array(vmdesc);
     }
 
     ret = vmstate_subsection_save(f, vmsd, opaque, vmdesc);
@@ -526,7 +522,7 @@ int vmstate_subsection_load(QEMUFile *f, const VMStateDescription *vmsd,
 }
 
 static int vmstate_subsection_save(QEMUFile *f, const VMStateDescription *vmsd,
-                                   void *opaque, QJSON *vmdesc)
+                                   void *opaque, JSONWriter *vmdesc)
 {
     const VMStateDescription **sub = vmsd->subsections;
     bool vmdesc_has_subsections = false;
@@ -542,11 +538,11 @@ static int vmstate_subsection_save(QEMUFile *f, const VMStateDescription *vmsd,
             if (vmdesc) {
                 /* Only create subsection array when we have any */
                 if (!vmdesc_has_subsections) {
-                    json_start_array(vmdesc, "subsections");
+                    json_writer_start_array(vmdesc, "subsections");
                     vmdesc_has_subsections = true;
                 }
 
-                json_start_object(vmdesc, NULL);
+                json_writer_start_object(vmdesc, NULL);
             }
 
             qemu_put_byte(f, QEMU_VM_SUBSECTION);
@@ -560,14 +556,14 @@ static int vmstate_subsection_save(QEMUFile *f, const VMStateDescription *vmsd,
             }
 
             if (vmdesc) {
-                json_end_object(vmdesc);
+                json_writer_end_object(vmdesc);
             }
         }
         sub++;
     }
 
     if (vmdesc_has_subsections) {
-        json_end_array(vmdesc);
+        json_writer_end_array(vmdesc);
     }
 
     return ret;

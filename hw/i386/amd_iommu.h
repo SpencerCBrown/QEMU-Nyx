@@ -23,6 +23,7 @@
 
 #include "hw/pci/pci.h"
 #include "hw/i386/x86-iommu.h"
+#include "qom/object.h"
 
 /* Capability registers */
 #define AMDVI_CAPAB_BAR_LOW           0x04
@@ -296,30 +297,28 @@ struct irte_ga {
 };
 
 #define TYPE_AMD_IOMMU_DEVICE "amd-iommu"
-#define AMD_IOMMU_DEVICE(obj)\
-    OBJECT_CHECK(AMDVIState, (obj), TYPE_AMD_IOMMU_DEVICE)
+OBJECT_DECLARE_SIMPLE_TYPE(AMDVIState, AMD_IOMMU_DEVICE)
 
 #define TYPE_AMD_IOMMU_PCI "AMDVI-PCI"
+OBJECT_DECLARE_SIMPLE_TYPE(AMDVIPCIState, AMD_IOMMU_PCI)
 
 #define TYPE_AMD_IOMMU_MEMORY_REGION "amd-iommu-iommu-memory-region"
 
 typedef struct AMDVIAddressSpace AMDVIAddressSpace;
 
 /* functions to steal PCI config space */
-typedef struct AMDVIPCIState {
+struct AMDVIPCIState {
     PCIDevice dev;               /* The PCI device itself        */
-} AMDVIPCIState;
+    uint32_t capab_offset;       /* capability offset pointer    */
+};
 
-typedef struct AMDVIState {
+struct AMDVIState {
     X86IOMMUState iommu;        /* IOMMU bus device             */
     AMDVIPCIState pci;          /* IOMMU PCI device             */
 
     uint32_t version;
-    uint32_t capab_offset;       /* capability offset pointer    */
 
     uint64_t mmio_addr;
-
-    uint32_t devid;              /* auto-assigned devid          */
 
     bool enabled;                /* IOMMU enabled                */
     bool ats_enabled;            /* address translation enabled  */
@@ -367,6 +366,6 @@ typedef struct AMDVIState {
 
     /* Interrupt remapping */
     bool ga_enabled;
-} AMDVIState;
+};
 
 #endif

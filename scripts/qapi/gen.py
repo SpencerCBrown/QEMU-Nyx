@@ -2,7 +2,7 @@
 #
 # QAPI code generation
 #
-# Copyright (c) 2018-2019 Red Hat Inc.
+# Copyright (c) 2015-2019 Red Hat Inc.
 #
 # Authors:
 #  Markus Armbruster <armbru@redhat.com>
@@ -11,63 +11,88 @@
 # This work is licensed under the terms of the GNU GPL, version 2.
 # See the COPYING file in the top-level directory.
 
-
-import errno
-import os
-import re
-import sys
 from contextlib import contextmanager
+import os
+import sys
+import re
+from typing import (
+    Dict,
+    Iterator,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
-from qapi.common import *
-from qapi.schema import QAPISchemaVisitor
+from .common import (
+    c_fname,
+    c_name,
+    guardend,
+    guardstart,
+    mcgen,
+)
+from .schema import (
+    QAPISchemaFeature,
+    QAPISchemaIfCond,
+    QAPISchemaModule,
+    QAPISchemaObjectType,
+    QAPISchemaVisitor,
+)
+from .source import QAPISourceInfo
 
 
-class QAPIGen(object):
+def gen_special_features(features: Sequence[QAPISchemaFeature]) -> str:
+    special_features = [f"1u << QAPI_{feat.name.upper()}"
+                        for feat in features if feat.is_special()]
+    return ' | '.join(special_features) or '0'
 
-    def __init__(self, fname):
+
+class QAPIGen:
+    def __init__(self, fname: str):
         self.fname = fname
         self._preamble = ''
         self._body = ''
 
-    def preamble_add(self, text):
+    def preamble_add(self, text: str) -> None:
         self._preamble += text
 
-    def add(self, text):
+    def add(self, text: str) -> None:
         self._body += text
 
-    def get_content(self):
+    def get_content(self) -> str:
         return self._top() + self._preamble + self._body + self._bottom()
 
-    def _top(self):
+    def _top(self) -> str:
+        # pylint: disable=no-self-use
         return ''
 
-    def _bottom(self):
+    def _bottom(self) -> str:
+        # pylint: disable=no-self-use
         return ''
 
-    def write(self, output_dir):
+    def write(self, output_dir: str) -> None:
+        # Include paths starting with ../ are used to reuse modules of the main
+        # schema in specialised schemas. Don't overwrite the files that are
+        # already generated for the main schema.
+        if self.fname.startswith('../'):
+            return
         pathname = os.path.join(output_dir, self.fname)
-        dir = os.path.dirname(pathname)
-        if dir:
-            try:
-                os.makedirs(dir)
-            except os.error as e:
-                if e.errno != errno.EEXIST:
-                    raise
+        odir = os.path.dirname(pathname)
+
+        if odir:
+            os.makedirs(odir, exist_ok=True)
+
+        # use os.open for O_CREAT to create and read a non-existant file
         fd = os.open(pathname, os.O_RDWR | os.O_CREAT, 0o666)
-        if sys.version_info[0] >= 3:
-            f = open(fd, 'r+', encoding='utf-8')
-        else:
-            f = os.fdopen(fd, 'r+')
-        text = self.get_content()
-        oldtext = f.read(len(text) + 1)
-        if text != oldtext:
-            f.seek(0)
-            f.truncate(0)
-            f.write(text)
-        f.close()
+        with os.fdopen(fd, 'r+', encoding='utf-8') as fp:
+            text = self.get_content()
+            oldtext = fp.read(len(text) + 1)
+            if text != oldtext:
+                fp.seek(0)
+                fp.truncate(0)
+                fp.write(text)
 
 
-def _wrap_ifcond(ifcond, before, after):
+def _wrap_ifcond(ifcond: QAPISchemaIfCond, before: str, after: str) -> str:
     if before == after:
         return after   # suppress empty #if ... #endif
 
@@ -77,49 +102,68 @@ def _wrap_ifcond(ifcond, before, after):
     if added[0] == '\n':
         out += '\n'
         added = added[1:]
-    out += gen_if(ifcond)
+    out += ifcond.gen_if()
     out += added
-    out += gen_endif(ifcond)
+    out += ifcond.gen_endif()
     return out
 
 
+def build_params(arg_type: Optional[QAPISchemaObjectType],
+                 boxed: bool,
+                 extra: Optional[str] = None) -> str:
+    ret = ''
+    sep = ''
+    if boxed:
+        assert arg_type
+        ret += '%s arg' % arg_type.c_param_type()
+        sep = ', '
+    elif arg_type:
+        assert not arg_type.variants
+        for memb in arg_type.members:
+            assert not memb.ifcond.is_present()
+            ret += sep
+            sep = ', '
+            if memb.need_has():
+                ret += 'bool has_%s, ' % c_name(memb.name)
+            ret += '%s %s' % (memb.type.c_param_type(),
+                              c_name(memb.name))
+    if extra:
+        ret += sep + extra
+    return ret if ret else 'void'
+
+
 class QAPIGenCCode(QAPIGen):
+    def __init__(self, fname: str):
+        super().__init__(fname)
+        self._start_if: Optional[Tuple[QAPISchemaIfCond, str, str]] = None
 
-    def __init__(self, fname):
-        QAPIGen.__init__(self, fname)
-        self._start_if = None
-
-    def start_if(self, ifcond):
+    def start_if(self, ifcond: QAPISchemaIfCond) -> None:
         assert self._start_if is None
         self._start_if = (ifcond, self._body, self._preamble)
 
-    def end_if(self):
-        assert self._start_if
-        self._wrap_ifcond()
-        self._start_if = None
-
-    def _wrap_ifcond(self):
+    def end_if(self) -> None:
+        assert self._start_if is not None
         self._body = _wrap_ifcond(self._start_if[0],
                                   self._start_if[1], self._body)
         self._preamble = _wrap_ifcond(self._start_if[0],
                                       self._start_if[2], self._preamble)
+        self._start_if = None
 
-    def get_content(self):
+    def get_content(self) -> str:
         assert self._start_if is None
-        return QAPIGen.get_content(self)
+        return super().get_content()
 
 
 class QAPIGenC(QAPIGenCCode):
-
-    def __init__(self, fname, blurb, pydoc):
-        QAPIGenCCode.__init__(self, fname)
+    def __init__(self, fname: str, blurb: str, pydoc: str):
+        super().__init__(fname)
         self._blurb = blurb
         self._copyright = '\n * '.join(re.findall(r'^Copyright .*', pydoc,
                                                   re.MULTILINE))
 
-    def _top(self):
+    def _top(self) -> str:
         return mcgen('''
-/* AUTOMATICALLY GENERATED, DO NOT MODIFY */
+/* AUTOMATICALLY GENERATED by %(tool)s DO NOT MODIFY */
 
 /*
 %(blurb)s
@@ -131,9 +175,10 @@ class QAPIGenC(QAPIGenCCode):
  */
 
 ''',
+                     tool=os.path.basename(sys.argv[0]),
                      blurb=self._blurb, copyright=self._copyright)
 
-    def _bottom(self):
+    def _bottom(self) -> str:
         return mcgen('''
 
 /* Dummy declaration to prevent empty .o file */
@@ -143,19 +188,28 @@ char qapi_dummy_%(name)s;
 
 
 class QAPIGenH(QAPIGenC):
+    def _top(self) -> str:
+        return super()._top() + guardstart(self.fname)
 
-    def _top(self):
-        return QAPIGenC._top(self) + guardstart(self.fname)
-
-    def _bottom(self):
+    def _bottom(self) -> str:
         return guardend(self.fname)
 
 
-@contextmanager
-def ifcontext(ifcond, *args):
-    """A 'with' statement context manager to wrap with start_if()/end_if()
+class QAPIGenTrace(QAPIGen):
+    def _top(self) -> str:
+        return (super()._top()
+                + '# AUTOMATICALLY GENERATED by '
+                + os.path.basename(sys.argv[0])
+                + ', DO NOT MODIFY\n\n')
 
-    *args: any number of QAPIGenCCode
+
+@contextmanager
+def ifcontext(ifcond: QAPISchemaIfCond, *args: QAPIGenCCode) -> Iterator[None]:
+    """
+    A with-statement context manager that wraps with `start_if()` / `end_if()`.
+
+    :param ifcond: A sequence of conditionals, passed to `start_if()`.
+    :param args: any number of `QAPIGenCCode`.
 
     Example::
 
@@ -177,16 +231,12 @@ def ifcontext(ifcond, *args):
         arg.end_if()
 
 
-class QAPIGenDoc(QAPIGen):
-
-    def _top(self):
-        return (QAPIGen._top(self)
-                + '@c AUTOMATICALLY GENERATED, DO NOT MODIFY\n\n')
-
-
 class QAPISchemaMonolithicCVisitor(QAPISchemaVisitor):
-
-    def __init__(self, prefix, what, blurb, pydoc):
+    def __init__(self,
+                 prefix: str,
+                 what: str,
+                 blurb: str,
+                 pydoc: str):
         self._prefix = prefix
         self._what = what
         self._genc = QAPIGenC(self._prefix + self._what + '.c',
@@ -194,95 +244,122 @@ class QAPISchemaMonolithicCVisitor(QAPISchemaVisitor):
         self._genh = QAPIGenH(self._prefix + self._what + '.h',
                               blurb, pydoc)
 
-    def write(self, output_dir):
+    def write(self, output_dir: str) -> None:
         self._genc.write(output_dir)
         self._genh.write(output_dir)
 
 
 class QAPISchemaModularCVisitor(QAPISchemaVisitor):
-
-    def __init__(self, prefix, what, blurb, pydoc):
+    def __init__(self,
+                 prefix: str,
+                 what: str,
+                 user_blurb: str,
+                 builtin_blurb: Optional[str],
+                 pydoc: str,
+                 gen_tracing: bool = False):
         self._prefix = prefix
         self._what = what
-        self._blurb = blurb
+        self._user_blurb = user_blurb
+        self._builtin_blurb = builtin_blurb
         self._pydoc = pydoc
-        self._genc = None
-        self._genh = None
-        self._module = {}
-        self._main_module = None
+        self._current_module: Optional[str] = None
+        self._module: Dict[str, Tuple[QAPIGenC, QAPIGenH,
+                                      Optional[QAPIGenTrace]]] = {}
+        self._main_module: Optional[str] = None
+        self._gen_tracing = gen_tracing
+
+    @property
+    def _genc(self) -> QAPIGenC:
+        assert self._current_module is not None
+        return self._module[self._current_module][0]
+
+    @property
+    def _genh(self) -> QAPIGenH:
+        assert self._current_module is not None
+        return self._module[self._current_module][1]
+
+    @property
+    def _gen_trace_events(self) -> QAPIGenTrace:
+        assert self._gen_tracing
+        assert self._current_module is not None
+        gent = self._module[self._current_module][2]
+        assert gent is not None
+        return gent
 
     @staticmethod
-    def _is_user_module(name):
-        return name and not name.startswith('./')
-
-    @staticmethod
-    def _is_builtin_module(name):
-        return not name
-
-    def _module_dirname(self, what, name):
-        if self._is_user_module(name):
+    def _module_dirname(name: str) -> str:
+        if QAPISchemaModule.is_user_module(name):
             return os.path.dirname(name)
         return ''
 
-    def _module_basename(self, what, name):
-        ret = '' if self._is_builtin_module(name) else self._prefix
-        if self._is_user_module(name):
+    def _module_basename(self, what: str, name: str) -> str:
+        ret = '' if QAPISchemaModule.is_builtin_module(name) else self._prefix
+        if QAPISchemaModule.is_user_module(name):
             basename = os.path.basename(name)
             ret += what
             if name != self._main_module:
                 ret += '-' + os.path.splitext(basename)[0]
         else:
-            name = name[2:] if name else 'builtin'
-            ret += re.sub(r'-', '-' + name + '-', what)
+            assert QAPISchemaModule.is_system_module(name)
+            ret += re.sub(r'-', '-' + name[2:] + '-', what)
         return ret
 
-    def _module_filename(self, what, name):
-        return os.path.join(self._module_dirname(what, name),
+    def _module_filename(self, what: str, name: str) -> str:
+        return os.path.join(self._module_dirname(name),
                             self._module_basename(what, name))
 
-    def _add_module(self, name, blurb):
+    def _add_module(self, name: str, blurb: str) -> None:
+        if QAPISchemaModule.is_user_module(name):
+            if self._main_module is None:
+                self._main_module = name
         basename = self._module_filename(self._what, name)
         genc = QAPIGenC(basename + '.c', blurb, self._pydoc)
         genh = QAPIGenH(basename + '.h', blurb, self._pydoc)
-        self._module[name] = (genc, genh)
-        self._set_module(name)
 
-    def _add_user_module(self, name, blurb):
-        assert self._is_user_module(name)
-        if self._main_module is None:
-            self._main_module = name
-        self._add_module(name, blurb)
+        gent: Optional[QAPIGenTrace] = None
+        if self._gen_tracing:
+            gent = QAPIGenTrace(basename + '.trace-events')
 
-    def _add_system_module(self, name, blurb):
-        self._add_module(name and './' + name, blurb)
+        self._module[name] = (genc, genh, gent)
+        self._current_module = name
 
-    def _set_module(self, name):
-        self._genc, self._genh = self._module[name]
+    @contextmanager
+    def _temp_module(self, name: str) -> Iterator[None]:
+        old_module = self._current_module
+        self._current_module = name
+        yield
+        self._current_module = old_module
 
-    def write(self, output_dir, opt_builtins=False):
-        for name in self._module:
-            if self._is_builtin_module(name) and not opt_builtins:
+    def write(self, output_dir: str, opt_builtins: bool = False) -> None:
+        for name, (genc, genh, gent) in self._module.items():
+            if QAPISchemaModule.is_builtin_module(name) and not opt_builtins:
                 continue
-            (genc, genh) = self._module[name]
             genc.write(output_dir)
             genh.write(output_dir)
+            if gent is not None:
+                gent.write(output_dir)
 
-    def _begin_user_module(self, name):
+    def _begin_builtin_module(self) -> None:
         pass
 
-    def visit_module(self, name):
-        if name in self._module:
-            self._set_module(name)
-        elif self._is_builtin_module(name):
-            # The built-in module has not been created.  No code may
-            # be generated.
-            self._genc = None
-            self._genh = None
+    def _begin_user_module(self, name: str) -> None:
+        pass
+
+    def visit_module(self, name: str) -> None:
+        if QAPISchemaModule.is_builtin_module(name):
+            if self._builtin_blurb:
+                self._add_module(name, self._builtin_blurb)
+                self._begin_builtin_module()
+            else:
+                # The built-in module has not been created.  No code may
+                # be generated.
+                self._current_module = None
         else:
-            self._add_user_module(name, self._blurb)
+            assert QAPISchemaModule.is_user_module(name)
+            self._add_module(name, self._user_blurb)
             self._begin_user_module(name)
 
-    def visit_include(self, name, info):
+    def visit_include(self, name: str, info: Optional[QAPISourceInfo]) -> None:
         relname = os.path.relpath(self._module_filename(self._what, name),
                                   os.path.dirname(self._genh.fname))
         self._genh.preamble_add(mcgen('''

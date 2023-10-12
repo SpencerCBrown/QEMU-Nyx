@@ -28,10 +28,11 @@
 #include "qemu/queue.h"
 #include "qapi/qapi-types-audio.h"
 #include "hw/qdev-properties.h"
+#include "hw/qdev-properties-system.h"
 
 typedef void (*audio_callback_fn) (void *opaque, int avail);
 
-#ifdef HOST_WORDS_BIGENDIAN
+#if HOST_BIG_ENDIAN
 #define AUDIO_HOST_ENDIANNESS 1
 #else
 #define AUDIO_HOST_ENDIANNESS 0
@@ -60,7 +61,7 @@ typedef enum {
 
 struct audio_capture_ops {
     void (*notify) (void *opaque, audcnotification_e cmd);
-    void (*capture) (void *opaque, void *buf, int size);
+    void (*capture) (void *opaque, const void *buf, int size);
     void (*destroy) (void *opaque);
 };
 
@@ -90,8 +91,8 @@ typedef struct QEMUAudioTimeStamp {
     uint64_t old_ts;
 } QEMUAudioTimeStamp;
 
-void AUD_vlog (const char *cap, const char *fmt, va_list ap) GCC_FMT_ATTR(2, 0);
-void AUD_log (const char *cap, const char *fmt, ...) GCC_FMT_ATTR(2, 3);
+void AUD_vlog (const char *cap, const char *fmt, va_list ap) G_GNUC_PRINTF(2, 0);
+void AUD_log (const char *cap, const char *fmt, ...) G_GNUC_PRINTF(2, 3);
 
 void AUD_register_card (const char *name, QEMUSoundCard *card);
 void AUD_remove_card (QEMUSoundCard *card);
@@ -160,16 +161,17 @@ static inline void *advance (void *p, int incr)
 int wav_start_capture(AudioState *state, CaptureState *s, const char *path,
                       int freq, int bits, int nchannels);
 
-bool audio_is_cleaning_up(void);
 void audio_cleanup(void);
 
-void audio_sample_to_uint64(void *samples, int pos,
+void audio_sample_to_uint64(const void *samples, int pos,
                             uint64_t *left, uint64_t *right);
 void audio_sample_from_uint64(void *samples, int pos,
                             uint64_t left, uint64_t right);
 
+void audio_define(Audiodev *audio);
 void audio_parse_option(const char *opt);
-void audio_init_audiodevs(void);
+bool audio_init_audiodevs(void);
+void audio_help(void);
 void audio_legacy_help(void);
 
 AudioState *audio_state_by_name(const char *name);

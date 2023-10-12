@@ -9,21 +9,24 @@
 #ifndef HW_RTC_MC146818RTC_H
 #define HW_RTC_MC146818RTC_H
 
-#include "qapi/qapi-types-misc.h"
+#include "qapi/qapi-types-machine.h"
 #include "qemu/queue.h"
 #include "qemu/timer.h"
 #include "hw/isa/isa.h"
+#include "qom/object.h"
 
 #define TYPE_MC146818_RTC "mc146818rtc"
-#define MC146818_RTC(obj) OBJECT_CHECK(RTCState, (obj), TYPE_MC146818_RTC)
+OBJECT_DECLARE_SIMPLE_TYPE(MC146818RtcState, MC146818_RTC)
 
-typedef struct RTCState {
+struct MC146818RtcState {
     ISADevice parent_obj;
 
     MemoryRegion io;
     MemoryRegion coalesced_io;
     uint8_t cmos_data[128];
     uint8_t cmos_index;
+    uint8_t isairq;
+    uint16_t io_base;
     int32_t base_year;
     uint64_t base_rtc;
     uint64_t last_update;
@@ -43,14 +46,15 @@ typedef struct RTCState {
     Notifier clock_reset_notifier;
     LostTickPolicy lost_tick_policy;
     Notifier suspend_notifier;
-    QLIST_ENTRY(RTCState) link;
-} RTCState;
+    QLIST_ENTRY(MC146818RtcState) link;
+};
 
 #define RTC_ISA_IRQ 8
 
-ISADevice *mc146818_rtc_init(ISABus *bus, int base_year,
-                             qemu_irq intercept_irq);
-void rtc_set_memory(ISADevice *dev, int addr, int val);
-int rtc_get_memory(ISADevice *dev, int addr);
+MC146818RtcState *mc146818_rtc_init(ISABus *bus, int base_year,
+                                    qemu_irq intercept_irq);
+void mc146818rtc_set_cmos_data(MC146818RtcState *s, int addr, int val);
+int mc146818rtc_get_cmos_data(MC146818RtcState *s, int addr);
+void qmp_rtc_reset_reinjection(Error **errp);
 
-#endif /* MC146818RTC_H */
+#endif /* HW_RTC_MC146818RTC_H */

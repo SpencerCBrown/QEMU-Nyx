@@ -63,7 +63,7 @@ struct oss_params {
     int fragsize;
 };
 
-static void GCC_FMT_ATTR (2, 3) oss_logerr (int err, const char *fmt, ...)
+static void G_GNUC_PRINTF (2, 3) oss_logerr (int err, const char *fmt, ...)
 {
     va_list ap;
 
@@ -74,7 +74,7 @@ static void GCC_FMT_ATTR (2, 3) oss_logerr (int err, const char *fmt, ...)
     AUD_log (AUDIO_CAP, "Reason: %s\n", strerror (err));
 }
 
-static void GCC_FMT_ATTR (3, 4) oss_logerr2 (
+static void G_GNUC_PRINTF (3, 4) oss_logerr2 (
     int err,
     const char *typ,
     const char *fmt,
@@ -142,16 +142,14 @@ static int aud_to_ossfmt (AudioFormat fmt, int endianness)
     case AUDIO_FORMAT_S16:
         if (endianness) {
             return AFMT_S16_BE;
-        }
-        else {
+        } else {
             return AFMT_S16_LE;
         }
 
     case AUDIO_FORMAT_U16:
         if (endianness) {
             return AFMT_U16_BE;
-        }
-        else {
+        } else {
             return AFMT_U16_LE;
         }
 
@@ -254,7 +252,7 @@ static int oss_open(int in, struct oss_params *req, audsettings *as,
     audio_buf_info abinfo;
     int fmt, freq, nchannels;
     int setfragment = 1;
-    const char *dspname = opdo->has_dev ? opdo->dev : "/dev/dsp";
+    const char *dspname = opdo->dev ?: "/dev/dsp";
     const char *typ = in ? "ADC" : "DAC";
 #ifdef USE_DSP_POLICY
     int policy = oopts->has_dsp_policy ? oopts->dsp_policy : 5;
@@ -382,11 +380,32 @@ static size_t oss_get_available_bytes(OSSVoiceOut *oss)
     return audio_ring_dist(cntinfo.ptr, oss->hw.pos_emul, oss->hw.size_emul);
 }
 
+static void oss_run_buffer_out(HWVoiceOut *hw)
+{
+    OSSVoiceOut *oss = (OSSVoiceOut *)hw;
+
+    if (!oss->mmapped) {
+        audio_generic_run_buffer_out(hw);
+    }
+}
+
+static size_t oss_buffer_get_free(HWVoiceOut *hw)
+{
+    OSSVoiceOut *oss = (OSSVoiceOut *)hw;
+
+    if (oss->mmapped) {
+        return oss_get_available_bytes(oss);
+    } else {
+        return audio_generic_buffer_get_free(hw);
+    }
+}
+
 static void *oss_get_buffer_out(HWVoiceOut *hw, size_t *size)
 {
-    OSSVoiceOut *oss = (OSSVoiceOut *) hw;
+    OSSVoiceOut *oss = (OSSVoiceOut *)hw;
+
     if (oss->mmapped) {
-        *size = MIN(oss_get_available_bytes(oss), hw->size_emul - hw->pos_emul);
+        *size = hw->size_emul - hw->pos_emul;
         return hw->buf_emul + hw->pos_emul;
     } else {
         return audio_generic_get_buffer_out(hw, size);
@@ -420,7 +439,7 @@ static size_t oss_write(HWVoiceOut *hw, void *buf, size_t len)
             size_t to_copy = MIN(len, hw->size_emul - hw->pos_emul);
             memcpy(hw->buf_emul + hw->pos_emul, buf, to_copy);
 
-            hw->pos_emul = (hw->pos_emul + to_copy) % hw->pos_emul;
+            hw->pos_emul = (hw->pos_emul + to_copy) % hw->size_emul;
             buf += to_copy;
             len -= to_copy;
         }
@@ -533,16 +552,14 @@ static int oss_init_out(HWVoiceOut *hw, struct audsettings *as,
             int trig = 0;
             if (ioctl (fd, SNDCTL_DSP_SETTRIGGER, &trig) < 0) {
                 oss_logerr (errno, "SNDCTL_DSP_SETTRIGGER 0 failed\n");
-            }
-            else {
+            } else {
                 trig = PCM_ENABLE_OUTPUT;
                 if (ioctl (fd, SNDCTL_DSP_SETTRIGGER, &trig) < 0) {
                     oss_logerr (
                         errno,
                         "SNDCTL_DSP_SETTRIGGER PCM_ENABLE_OUTPUT failed\n"
                         );
-                }
-                else {
+                } else {
                     oss->mmapped = 1;
                 }
             }
@@ -570,20 +587,18 @@ static void oss_enable_out(HWVoiceOut *hw, bool enable)
     AudiodevOssPerDirectionOptions *opdo = oss->dev->u.oss.out;
 
     if (enable) {
-        bool poll_mode = opdo->try_poll;
+        hw->poll_mode = opdo->try_poll;
 
         ldebug("enabling voice\n");
-        if (poll_mode) {
+        if (hw->poll_mode) {
             oss_poll_out(hw);
-            poll_mode = 0;
         }
-        hw->poll_mode = poll_mode;
 
         if (!oss->mmapped) {
             return;
         }
 
-        audio_pcm_info_clear_buf(&hw->info, hw->buf_emul, hw->mix_buf->size);
+        audio_pcm_info_clear_buf(&hw->info, hw->buf_emul, hw->samples);
         trig = PCM_ENABLE_OUTPUT;
         if (ioctl(oss->fd, SNDCTL_DSP_SETTRIGGER, &trig) < 0) {
             oss_logerr(errno,
@@ -684,6 +699,7 @@ static size_t oss_read(HWVoiceIn *hw, void *buf, size_t len)
                            len, dst);
                 break;
             }
+            break;
         }
 
         pos += nread;
@@ -699,17 +715,15 @@ static void oss_enable_in(HWVoiceIn *hw, bool enable)
     AudiodevOssPerDirectionOptions *opdo = oss->dev->u.oss.out;
 
     if (enable) {
-        bool poll_mode = opdo->try_poll;
+        hw->poll_mode = opdo->try_poll;
 
-        if (poll_mode) {
+        if (hw->poll_mode) {
             oss_poll_in(hw);
-            poll_mode = 0;
         }
-        hw->poll_mode = poll_mode;
     } else {
         if (hw->poll_mode) {
-            hw->poll_mode = 0;
             qemu_set_fd_handler (oss->fd, NULL, NULL, NULL);
+            hw->poll_mode = 0;
         }
     }
 }
@@ -731,10 +745,8 @@ static void *oss_audio_init(Audiodev *dev)
     oss_init_per_direction(oopts->in);
     oss_init_per_direction(oopts->out);
 
-    if (access(oopts->in->has_dev ? oopts->in->dev : "/dev/dsp",
-               R_OK | W_OK) < 0 ||
-        access(oopts->out->has_dev ? oopts->out->dev : "/dev/dsp",
-               R_OK | W_OK) < 0) {
+    if (access(oopts->in->dev ?: "/dev/dsp", R_OK | W_OK) < 0 ||
+        access(oopts->out->dev ?: "/dev/dsp", R_OK | W_OK) < 0) {
         return NULL;
     }
     return dev;
@@ -748,6 +760,8 @@ static struct audio_pcm_ops oss_pcm_ops = {
     .init_out = oss_init_out,
     .fini_out = oss_fini_out,
     .write    = oss_write,
+    .buffer_get_free = oss_buffer_get_free,
+    .run_buffer_out = oss_run_buffer_out,
     .get_buffer_out = oss_get_buffer_out,
     .put_buffer_out = oss_put_buffer_out,
     .enable_out = oss_enable_out,
@@ -755,6 +769,7 @@ static struct audio_pcm_ops oss_pcm_ops = {
     .init_in  = oss_init_in,
     .fini_in  = oss_fini_in,
     .read     = oss_read,
+    .run_buffer_in = audio_generic_run_buffer_in,
     .enable_in = oss_enable_in
 };
 
