@@ -9,11 +9,12 @@
 #include "qemu/rcu_queue.h"
 
 #include "block/qapi.h"
-#include "exec/ram_addr.h"
+// #include "exec/ram_addr.h"
+//#include "exec/cpu-defs.h"
 #include "migration/global_state.h"
 #include "migration/migration.h"
 #include "migration/qemu-file.h"
-#include "migration/qjson.h"
+// #include "migration/qjson.h"
 #include "migration/register.h"
 #include "migration/savevm.h"
 #include "migration/vmstate.h"
@@ -24,10 +25,18 @@
 #include "sysemu/runstate.h"
 #include "sysemu/sysemu.h"
 
+#include "qemu/osdep.h"
+#include "io/channel-buffer.h"
+#include "io/channel-watch.h"
+#include "qemu/module.h"
+#include "qemu/sockets.h"
+#include "trace.h"
+
 #include "nyx/debug.h"
 #include "nyx/snapshot/devices/nyx_device_state.h"
 #include "nyx/snapshot/devices/state_reallocation.h"
 #include "nyx/snapshot/devices/vm_change_state_handlers.h"
+#include "nyx/snapshot/devices/nyx_qio_buffer.h"
 
 #define STATE_BUFFER 0x8000000 /* up to 128MB */
 
@@ -97,7 +106,7 @@ typedef struct SaveState {
 
 extern SaveState savevm_state;
 
-extern void vmstate_save(QEMUFile *f, SaveStateEntry *se, QJSON *vmdesc);
+extern void vmstate_save(QEMUFile *f, SaveStateEntry *se, JSONWriter *vmdesc);
 extern bool should_send_vmdesc(void);
 
 extern bool skip_section_footers;
@@ -109,7 +118,7 @@ extern void save_section_header(QEMUFile *f, SaveStateEntry *se, uint8_t section
 /* skip block ram */
 static void fast_qemu_savevm_state_complete_precopy(QEMUFile *f, bool iterable_only)
 {
-    QJSON          *vmdesc;
+    JSONWriter      *vmdesc;
     int             vmdesc_len;
     SaveStateEntry *se;
     int             ret;
@@ -147,9 +156,10 @@ static void fast_qemu_savevm_state_complete_precopy(QEMUFile *f, bool iterable_o
         return;
     }
 
-    vmdesc = qjson_new();
-    json_prop_int(vmdesc, "page_size", TARGET_PAGE_SIZE);
-    json_start_array(vmdesc, "devices");
+    vmdesc = json_writer_new(false);
+    json_writer_start_object(vmdesc, NULL);
+    json_writer_int64(vmdesc, "page_size", TARGET_PAGE_SIZE);
+    json_writer_start_array(vmdesc, "devices");
     QTAILQ_FOREACH (se, &savevm_state.handlers, entry) {
         if (strcmp(se->idstr, "ram") && strcmp(se->idstr, "block")) {
             if ((!se->ops || !se->ops->save_state) && !se->vmsd) {
@@ -159,15 +169,15 @@ static void fast_qemu_savevm_state_complete_precopy(QEMUFile *f, bool iterable_o
                 continue;
             }
 
-            json_start_object(vmdesc, NULL);
-            json_prop_str(vmdesc, "name", se->idstr);
-            json_prop_int(vmdesc, "instance_id", se->instance_id);
+            json_writer_start_object(vmdesc, se->idstr);
+            json_writer_str(vmdesc, "name", se->idstr);
+            json_writer_int64(vmdesc, "instance_id", se->instance_id);
 
             save_section_header(f, se, QEMU_VM_SECTION_FULL);
             vmstate_save(f, se, vmdesc);
             save_section_footer(f, se);
 
-            json_end_object(vmdesc);
+            json_writer_end_object(vmdesc);
         }
     }
 
@@ -176,16 +186,16 @@ static void fast_qemu_savevm_state_complete_precopy(QEMUFile *f, bool iterable_o
         qemu_put_byte(f, QEMU_VM_EOF);
     }
 
-    json_end_array(vmdesc);
-    qjson_finish(vmdesc);
-    vmdesc_len = strlen(qjson_get_str(vmdesc));
+    json_writer_end_array(vmdesc);
+    json_writer_end_object(vmdesc);
+    vmdesc_len = strlen(json_writer_get(vmdesc));
 
     if (should_send_vmdesc()) {
         qemu_put_byte(f, QEMU_VM_VMDESCRIPTION);
         qemu_put_be32(f, vmdesc_len);
-        qemu_put_buffer(f, (uint8_t *)qjson_get_str(vmdesc), vmdesc_len);
+        qemu_put_buffer(f, (uint8_t *)json_writer_get(vmdesc), vmdesc_len);
     }
-    qjson_destroy(vmdesc);
+    json_writer_free(vmdesc);
 
     qemu_fflush(f);
 }
@@ -215,7 +225,7 @@ static int fast_qemu_savevm_state_iterate(QEMUFile *f, bool postcopy)
             if (postcopy && !se->ops->save_live_complete_postcopy) {
                 continue;
             }
-            if (qemu_file_rate_limit(f)) {
+            if (migration_rate_exceeded(f)) {
                 return 0;
             }
 
@@ -282,55 +292,55 @@ static int fast_qemu_savevm_state(QEMUFile *f, Error **errp)
     return 0;
 }
 
-/* QEMUFile RAM Emulation */
-static ssize_t fast_savevm_writev_buffer(void         *opaque,
-                                         struct iovec *iov,
-                                         int           iovcnt,
-                                         int64_t       pos)
-{
-    ssize_t retval = 0;
-    for (uint32_t i = 0; i < iovcnt; i++) {
-        memcpy((void *)(((struct fast_savevm_opaque_t *)(opaque))->buf +
-                        ((struct fast_savevm_opaque_t *)(opaque))->pos),
-               iov[i].iov_base, iov[i].iov_len);
-        ((struct fast_savevm_opaque_t *)(opaque))->pos += iov[i].iov_len;
-        retval += iov[i].iov_len;
-    }
-    return retval;
-}
+// /* QEMUFile RAM Emulation */
+// static ssize_t fast_savevm_writev_buffer(void         *opaque,
+//                                          struct iovec *iov,
+//                                          int           iovcnt,
+//                                          int64_t       pos)
+// {
+//     ssize_t retval = 0;
+//     for (uint32_t i = 0; i < iovcnt; i++) {
+//         memcpy((void *)(((struct fast_savevm_opaque_t *)(opaque))->buf +
+//                         ((struct fast_savevm_opaque_t *)(opaque))->pos),
+//                iov[i].iov_base, iov[i].iov_len);
+//         ((struct fast_savevm_opaque_t *)(opaque))->pos += iov[i].iov_len;
+//         retval += iov[i].iov_len;
+//     }
+//     return retval;
+// }
 
 
-static int fast_savevm_fclose_save_to_buffer(void *opaque)
-{
-    memcpy(((struct fast_savevm_opaque_t *)(opaque))->output_buffer,
-           ((struct fast_savevm_opaque_t *)(opaque))->buf,
-           ((struct fast_savevm_opaque_t *)(opaque))->pos);
-    *((struct fast_savevm_opaque_t *)(opaque))->output_buffer_size =
-        ((struct fast_savevm_opaque_t *)(opaque))->pos;
-    // printf("DUMPED: %d\n", *((struct fast_savevm_opaque_t*)(opaque))->output_buffer_size);
-    return 0;
-}
+// static int fast_savevm_fclose_save_to_buffer(void *opaque)
+// {
+//     memcpy(((struct fast_savevm_opaque_t *)(opaque))->output_buffer,
+//            ((struct fast_savevm_opaque_t *)(opaque))->buf,
+//            ((struct fast_savevm_opaque_t *)(opaque))->pos);
+//     *((struct fast_savevm_opaque_t *)(opaque))->output_buffer_size =
+//         ((struct fast_savevm_opaque_t *)(opaque))->pos;
+//     // printf("DUMPED: %d\n", *((struct fast_savevm_opaque_t*)(opaque))->output_buffer_size);
+//     return 0;
+// }
 
-static int fast_loadvm_fclose(void *opaque)
-{
-    return 0;
-}
+// static int fast_loadvm_fclose(void *opaque)
+// {
+//     return 0;
+// }
 
-static ssize_t fast_loadvm_get_buffer(void *opaque, uint8_t *buf, int64_t pos, size_t size)
-{
-    memcpy(buf, (void *)(((struct fast_savevm_opaque_t *)(opaque))->buf + pos), size);
-    return size;
-}
+// static ssize_t fast_loadvm_get_buffer(void *opaque, uint8_t *buf, int64_t pos, size_t size)
+// {
+//     memcpy(buf, (void *)(((struct fast_savevm_opaque_t *)(opaque))->buf + pos), size);
+//     return size;
+// }
 
-static const QEMUFileOps fast_loadvm_ops = {
-    .get_buffer = (QEMUFileGetBufferFunc *)fast_loadvm_get_buffer,
-    .close      = (QEMUFileCloseFunc *)fast_loadvm_fclose
-};
+// static const QEMUFileOps fast_loadvm_ops = {
+//     .get_buffer = (QEMUFileGetBufferFunc *)fast_loadvm_get_buffer,
+//     .close      = (QEMUFileCloseFunc *)fast_loadvm_fclose
+// };
 
-static const QEMUFileOps fast_savevm_ops_to_buffer = {
-    .writev_buffer = (QEMUFileWritevBufferFunc *)fast_savevm_writev_buffer,
-    .close         = (QEMUFileCloseFunc *)fast_savevm_fclose_save_to_buffer
-};
+// static const QEMUFileOps fast_savevm_ops_to_buffer = {
+//     .writev_buffer = (QEMUFileWritevBufferFunc *)fast_savevm_writev_buffer,
+//     .close         = (QEMUFileCloseFunc *)fast_savevm_fclose_save_to_buffer
+// };
 
 
 nyx_device_state_t *nyx_device_state_init_from_snapshot(const char *snapshot_folder,
@@ -349,8 +359,7 @@ nyx_device_state_t *nyx_device_state_init_from_snapshot(const char *snapshot_fol
     struct fast_savevm_opaque_t fast_savevm_opaque;
     FILE                       *f;
 
-    uint8_t ret = global_state_store();
-    assert(!ret);
+    global_state_store();
 
     struct stat buffer;
     assert(stat(qemu_state_file, &buffer) == 0);
@@ -364,9 +373,11 @@ nyx_device_state_t *nyx_device_state_init_from_snapshot(const char *snapshot_fol
     fast_savevm_opaque.buf = state_buf2;
     fast_savevm_opaque.f   = NULL;
     fast_savevm_opaque.pos = 0;
-    QEMUFile *file_dump    = qemu_fopen_ops(&fast_savevm_opaque, &fast_loadvm_ops);
+    NYXQIOBuffer *fast_loadvm_backing = nyx_qio_buffer_new(&fast_savevm_opaque);
+    // QEMUFile *file_dump    = qemu_fopen_ops(&fast_savevm_opaque, &fast_loadvm_ops);
+    QEMUFile *file_dump = qemu_file_new_input(fast_loadvm_backing);
 
-    qemu_devices_reset();
+    qemu_devices_reset(SHUTDOWN_CAUSE_NONE);
     qemu_loadvm_state(file_dump);
 
     if (!pre_snapshot) {
@@ -409,16 +420,22 @@ nyx_device_state_t *nyx_device_state_init(void)
     fast_savevm_opaque.f   = NULL;
     fast_savevm_opaque.pos = 0;
 
-    uint8_t ret = global_state_store();
-    assert(!ret);
+    global_state_store();
+    NYXQIOBuffer *fast_savevm_backing = nyx_qio_buffer_new(&fast_savevm_opaque);
+    // QEMUFile *f = qemu_fopen_ops(&fast_savevm_opaque, &fast_savevm_ops_to_buffer);
+    QEMUFile *f = qemu_file_new_output(fast_savevm_backing);
+    uint8_t ret         = fast_qemu_savevm_state(f, &local_err);
 
-    QEMUFile *f = qemu_fopen_ops(&fast_savevm_opaque, &fast_savevm_ops_to_buffer);
-    ret         = fast_qemu_savevm_state(f, &local_err);
+    // DEBUG
+
+    // DEBUG
 
     fast_loadvm_opaque.buf = tmp_buf;
     fast_loadvm_opaque.f   = NULL;
     fast_loadvm_opaque.pos = 0;
-    QEMUFile *file_dump    = qemu_fopen_ops(&fast_loadvm_opaque, &fast_loadvm_ops);
+    NYXQIOBuffer *fast_loadvm_backing = nyx_qio_buffer_new(&fast_loadvm_opaque);
+    // QEMUFile *file_dump    = qemu_fopen_ops(&fast_loadvm_opaque, &fast_loadvm_ops);
+    QEMUFile *file_dump = qemu_file_new_input(fast_loadvm_backing);
 
     self->qemu_state = state_reallocation_new(file_dump);
     qemu_fclose(file_dump);

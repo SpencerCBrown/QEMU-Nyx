@@ -33,7 +33,7 @@ along with QEMU-PT.  If not, see <http://www.gnu.org/licenses/>.
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 #include "hw/pci/pci.h"
-#include "hw/qdev-properties.h"
+#include "hw/qdev-properties-system.h"
 #include "migration/migration.h"
 #include "qapi/error.h"
 #include "qapi/visitor.h"
@@ -355,14 +355,16 @@ static void check_ipt_range(uint8_t i)
 static void check_available_ipt_ranges(nyx_interface_state *s)
 {
     uint64_t addr_a, addr_b;
+    Error *errp = NULL;
 
-    int kvm_fd = qemu_open("/dev/kvm", O_RDWR);
+    int kvm_fd = qemu_open("/dev/kvm", O_RDWR, &errp);
     if (kvm_fd == -1) {
         nyx_abort("Could not access KVM kernel module: %m\n");
     }
 
-    if (ioctl(kvm_fd, KVM_CHECK_EXTENSION, KVM_CAP_NYX_PT) == 1 &&
-        ioctl(kvm_fd, KVM_CHECK_EXTENSION, KVM_CAP_NYX_FDL) == 1)
+    // XXX: Looks like the Nyx kernel 6.0 removes the FDL capability?
+    if (ioctl(kvm_fd, KVM_CHECK_EXTENSION, KVM_CAP_NYX_PT) == 1 /* &&
+        ioctl(kvm_fd, KVM_CHECK_EXTENSION, KVM_CAP_NYX_FDL) == 1 */)
     {
         for (uint8_t i = 0; i < INTEL_PT_MAX_RANGES; i++) {
             if (s->ip_filter[i][0] && s->ip_filter[i][1]) {
@@ -471,7 +473,7 @@ static void nyx_interface_class_init(ObjectClass *klass, void *data)
 {
     DeviceClass *dc = DEVICE_CLASS(klass);
     dc->realize     = nyx_realize;
-    dc->props       = nyx_interface_properties;
+    device_class_set_props(dc, nyx_interface_properties);
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
     dc->desc = "Nyx Interface";
 }

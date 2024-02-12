@@ -5,7 +5,7 @@
 #include <capstone/x86.h>
 #include <libxdc.h>
 
-#include "qemu-common.h"
+#include "qemu-main.h"
 #include "khash.h"
 
 KHASH_MAP_INIT_INT64(PC_CACHE, uint64_t)

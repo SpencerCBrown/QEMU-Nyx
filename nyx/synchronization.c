@@ -2,7 +2,7 @@
 #include "qemu/main-loop.h"
 #include "sysemu/kvm.h"
 #include "sysemu/sysemu.h"
-#include "qemu-common.h"
+#include "qemu-main.h"
 #include "nyx/synchronization.h"
 #include "nyx/debug.h"
 #include "nyx/fast_vm_reload.h"
@@ -235,7 +235,9 @@ void synchronization_lock(void)
                                           GET_GLOBAL_STATE()->num_dirty_pages);
 
     if (synchronization_check_page_not_found()) {
-        set_success_auxiliary_result_buffer(GET_GLOBAL_STATE()->auxilary_buffer, 0);
+        // FIXME: This needs better handling. Will overwrite the exec_result_code with
+        // success, clobbering crashes and timeouts! Commented out for now.
+        //set_success_auxiliary_result_buffer(GET_GLOBAL_STATE()->auxilary_buffer, 0);
     }
 
     if (qemu_get_cpu(0)->intel_pt_run_trashed) {

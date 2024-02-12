@@ -2741,10 +2741,27 @@ static int kvm_init(MachineState *ms)
 */
 #ifdef QEMU_NYX
     if (s->nyx_dirty_ring) {
-        ret = 0;
-        goto err;
-    } else {
         ret = kvm_vm_enable_cap(s, KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2, 0, 1);
+        // for testing only
+    } else {
+        if (!s->kvm_dirty_ring_size) {
+            dirty_log_manual_caps =
+                kvm_check_extension(s, KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2);
+            dirty_log_manual_caps &= (KVM_DIRTY_LOG_MANUAL_PROTECT_ENABLE |
+                                      KVM_DIRTY_LOG_INITIALLY_SET);
+            s->manual_dirty_log_protect = dirty_log_manual_caps;
+            if (dirty_log_manual_caps) {
+                ret = kvm_vm_enable_cap(s, KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2, 0,
+                                        dirty_log_manual_caps);
+                if (ret) {
+                    warn_report("Trying to enable capability %"PRIu64" of "
+                                "KVM_CAP_MANUAL_DIRTY_LOG_PROTECT2 but failed. "
+                                "Falling back to the legacy mode. ",
+                                dirty_log_manual_caps);
+                    s->manual_dirty_log_protect = 0;
+                }
+            }
+        }
     }
 #else
     /*

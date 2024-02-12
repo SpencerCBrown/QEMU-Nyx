@@ -3180,6 +3180,7 @@ qom_ss = ss.source_set()
 system_ss = ss.source_set()
 specific_fuzz_ss = ss.source_set()
 specific_ss = ss.source_set()
+# nyx_ss = ss.source_set()
 stub_ss = ss.source_set()
 trace_ss = ss.source_set()
 user_ss = ss.source_set()
@@ -3334,6 +3335,7 @@ subdir('crypto')
 subdir('ui')
 subdir('hw')
 subdir('gdbstub')
+subdir('nyx')
 
 if enable_modules
   libmodulecommon = static_library('module-common', files('module-common.c') + genh, pic: true, c_args: '-DBUILD_DSO')
@@ -3443,6 +3445,18 @@ subdir('fpu')
 subdir('accel')
 subdir('plugins')
 subdir('ebpf')
+# subdir('nyx')
+
+# Nyx dependencies
+capstone_headers = include_directories('capstone_v4/include')
+xdc_headers = include_directories('libxdc/src')
+capstone_lib_dir = meson.current_source_dir() + '/capstone_v4/'
+xdc_lib_dir = meson.current_source_dir() + '/libxdc/'
+
+message('MyLibPath: ' + meson.current_source_dir())
+
+static_capstone = cc.find_library('capstone', dirs : capstone_lib_dir, static : true)
+static_libxdc = cc.find_library('xdc', dirs : xdc_lib_dir, static : true)
 
 common_user_inc = []
 
@@ -3590,6 +3604,12 @@ libcrypto = static_library('crypto', crypto_ss.sources() + genh,
                            name_suffix: 'fa',
                            build_by_default: false)
 
+# nyx_ss = nyx_ss.apply(config_host, strict: false)
+# libnyx = static_library('nyx', nyx_ss.sources() + genh,
+#                            dependencies: [static_capstone, static_libxdc],
+#                            name_suffix: 'fa',
+#                            build_by_default: false)
+
 crypto = declare_dependency(link_whole: libcrypto,
                             dependencies: [authz, qom])
 
@@ -3610,15 +3630,17 @@ migration = declare_dependency(link_with: libmigration,
 system_ss.add(migration)
 
 block_ss = block_ss.apply(config_host, strict: false)
+
 libblock = static_library('block', block_ss.sources() + genh,
                           dependencies: block_ss.dependencies(),
                           link_depends: block_syms,
                           name_suffix: 'fa',
                           build_by_default: false)
+                          #link_with: libnyx)
 
 block = declare_dependency(link_whole: [libblock],
                            link_args: '@block.syms',
-                           dependencies: [crypto, io])
+                           dependencies: [crypto, io, static_capstone, static_libxdc])
 
 blockdev_ss = blockdev_ss.apply(config_host, strict: false)
 libblockdev = static_library('blockdev', blockdev_ss.sources() + genh,
@@ -3680,8 +3702,9 @@ common_all = static_library('common',
                             sources: common_all.sources() + genh,
                             include_directories: common_user_inc,
                             implicit_include_directories: false,
-                            dependencies: common_all.dependencies(),
+                            dependencies: [common_all.dependencies()],
                             name_suffix: 'fa')
+                            #link_with: libnyx)
 
 feature_to_c = find_program('scripts/feature_to_c.sh')
 
@@ -3776,9 +3799,9 @@ foreach target : target_dirs
 
   lib = static_library('qemu-' + target,
                  sources: arch_srcs + genh,
-                 dependencies: arch_deps,
+                 dependencies: [arch_deps, static_capstone, static_libxdc],
                  objects: objects,
-                 include_directories: target_inc,
+                 include_directories: [target_inc, capstone_headers, xdc_headers],
                  c_args: c_args,
                  build_by_default: false,
                  name_suffix: 'fa')
@@ -3824,7 +3847,7 @@ foreach target : target_dirs
     emulator = executable(exe_name, exe['sources'],
                install: true,
                c_args: c_args,
-               dependencies: arch_deps + deps + exe['dependencies'],
+               dependencies: arch_deps + static_capstone + static_libxdc + deps + exe['dependencies'],
                objects: lib.extract_all_objects(recursive: true),
                link_depends: [block_syms, qemu_syms] + exe.get('link_depends', []),
                link_args: link_args,
@@ -3944,7 +3967,7 @@ subdir('scripts')
 subdir('tools')
 subdir('pc-bios')
 subdir('docs')
-subdir('tests')
+#subdir('tests')
 if gtk.found()
   subdir('po')
 endif

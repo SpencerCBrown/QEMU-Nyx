@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "io/channel.h"
+#include "qom/object.h"
+
 typedef struct nyx_device_state_s {
     state_reallocation_t *qemu_state;
 
@@ -16,7 +19,6 @@ typedef struct nyx_device_state_s {
     uint32_t state_buf_size;
 
 } nyx_device_state_t;
-
 
 nyx_device_state_t *nyx_device_state_init(void);
 nyx_device_state_t *nyx_device_state_init_from_snapshot(const char *snapshot_folder,

@@ -7,7 +7,7 @@
 
 #include "qemu/error-report.h"
 #include "qemu/log.h"
-#include "qemu-common.h"
+#include "qemu-main.h"
 
 #define ENABLE_BACKTRACES
 

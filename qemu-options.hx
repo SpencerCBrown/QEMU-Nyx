@@ -4901,11 +4901,10 @@ ERST
 #ifdef QEMU_NYX
 DEF("fast_vm_reload", HAS_ARG, QEMU_OPTION_fast_vm_reload,
     "-fast_vm_reload    snapshot-folder\n", QEMU_ARCH_ALL)
-STEXI
-@item -fast_vm_reload
-@findex -fast_vm_reload
-fast_vm_reload.
-ETEXI
+SRST
+``-fast_vm_reload snapshot-folder``
+    Enable Fast VM reload from snapshot folder
+ERST
 #endif
 
 DEF("msg", HAS_ARG, QEMU_OPTION_msg,

@@ -30,7 +30,7 @@ along with QEMU-PT.  If not, see <http://www.gnu.org/licenses/>.
 #include "sysemu/cpus.h"
 #include "sysemu/kvm.h"
 #include "sysemu/kvm_int.h"
-#include "qemu-common.h"
+#include "qemu-main.h"
 #include "target/i386/cpu.h"
 
 #include "nyx/debug.h"

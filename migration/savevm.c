@@ -272,7 +272,7 @@ static uint32_t get_validatable_capabilities_count(void)
 
 #ifdef QEMU_NYX
 int vmstate_load(QEMUFile *f, SaveStateEntry *se);
-int vmstate_save(QEMUFile *f, SaveStateEntry *se, QJSON *vmdesc);
+int vmstate_save(QEMUFile *f, SaveStateEntry *se, JSONWriter *vmdesc);
 void save_section_header(QEMUFile *f, SaveStateEntry *se, uint8_t section_type);
 void save_section_footer(QEMUFile *f, SaveStateEntry *se);
 bool should_send_vmdesc(void);
@@ -1023,9 +1023,6 @@ void save_section_footer(QEMUFile *f, SaveStateEntry *se)
 
 #ifndef QEMU_NYX
 static int vmstate_save(QEMUFile *f, SaveStateEntry *se, JSONWriter *vmdesc)
-#else
-int vmstate_save(QEMUFile *f, SaveStateEntry *se, JSONWriter *vmdesc)
-#endif
 {
     int ret;
 
@@ -1062,6 +1059,18 @@ int vmstate_save(QEMUFile *f, SaveStateEntry *se, JSONWriter *vmdesc)
     }
     return 0;
 }
+#else
+int vmstate_save(QEMUFile *f, SaveStateEntry *se, JSONWriter *vmdesc)
+{
+    trace_vmstate_save(se->idstr, se->vmsd ? se->vmsd->name : "(old)");
+    if (!se->vmsd) {
+        vmstate_save_old_style(f, se, vmdesc);
+        return 0;
+    }
+    return vmstate_save_state(f, se->vmsd, se->opaque, vmdesc);
+}
+#endif
+
 /**
  * qemu_savevm_command_send: Send a 'QEMU_VM_COMMAND' type element with the
  *                           command and associated data.

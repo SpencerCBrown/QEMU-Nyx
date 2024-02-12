@@ -114,7 +114,7 @@ static void fast_snapshot_init_operation(fast_reload_t *self,
         self->block_state = nyx_block_snapshot_init();
     }
 
-    memory_global_dirty_log_start();
+    memory_global_dirty_log_start(GLOBAL_DIRTY_MIGRATION);
     if (!pre_snapshot) {
         self->root_snapshot_created = true;
     }
@@ -171,7 +171,7 @@ static inline void fast_snapshot_pre_create_incremental_operation(fast_reload_t 
 {
     /* flush all pending block writes */
     bdrv_drain_all();
-    memory_global_dirty_log_sync();
+    memory_global_dirty_log_sync(false);
 
     nyx_device_state_switch_incremental(self->device_state);
     nyx_block_snapshot_switch_incremental(self->block_state);
@@ -358,8 +358,8 @@ static void fast_reload_create_from_snapshot(fast_reload_t *self,
     cpu_synchronize_all_pre_loadvm();
 
     if (!pre_snapshot) {
-        memory_global_dirty_log_stop();
-        memory_global_dirty_log_sync();
+        memory_global_dirty_log_stop(GLOBAL_DIRTY_MIGRATION);
+        memory_global_dirty_log_sync(false);
     }
 
     fast_snapshot_init_operation(self, folder, pre_snapshot);
@@ -406,9 +406,6 @@ void fast_reload_create_in_memory(fast_reload_t *self)
 
     cpu_synchronize_all_pre_loadvm();
 
-    memory_global_dirty_log_stop();
-    memory_global_dirty_log_sync();
-
     fast_snapshot_init_operation(self, NULL, false);
 
     rcu_read_unlock();
@@ -422,7 +419,7 @@ void fast_reload_restore(fast_reload_t *self)
 
     /* flush all pending block writes */
     bdrv_drain_all();
-    memory_global_dirty_log_sync();
+    memory_global_dirty_log_sync(false);
 
     nyx_block_snapshot_reset(self->block_state);
 
@@ -504,7 +501,7 @@ void fast_reload_discard_tmp_snapshot(fast_reload_t *self)
 
     /* flush all pending block writes */
     bdrv_drain_all();
-    memory_global_dirty_log_sync();
+    memory_global_dirty_log_sync(false); // TODO(Spencer): figure out what this argument should be
 
     fast_snapshot_restore_operation(self);
 

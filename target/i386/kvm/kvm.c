@@ -3694,15 +3694,6 @@ static int kvm_put_msrs(X86CPU *cpu, int level)
         }
     }
 
-#ifndef QEMU_NYX
-    if (ret < cpu->kvm_msr_buf->nmsrs) {
-        struct kvm_msr_entry *e = &cpu->kvm_msr_buf->entries[ret];
-        error_report("error: failed to set MSR 0x%" PRIx32 " to 0x%" PRIx64,
-                     (uint32_t)e->index, (uint64_t)e->data);
-    }
-    assert(ret == cpu->kvm_msr_buf->nmsrs);
-#endif
-
     return kvm_buf_set_msrs(cpu);
 }
 
@@ -4647,6 +4638,28 @@ static int kvm_guest_debug_workarounds(X86CPU *cpu)
         ret = kvm_update_guest_debug(cs, reinject_trap);
     }
     return ret;
+}
+
+// TODO: Nyx removed this, why?
+static int kvm_put_debugregs(X86CPU *cpu)
+{
+    CPUX86State *env = &cpu->env;
+    struct kvm_debugregs dbgregs;
+    int i;
+
+    if (!kvm_has_debugregs()) {
+        return 0;
+    }
+
+    memset(&dbgregs, 0, sizeof(dbgregs));
+    for (i = 0; i < 4; i++) {
+        dbgregs.db[i] = env->dr[i];
+    }
+    dbgregs.dr6 = env->dr[6];
+    dbgregs.dr7 = env->dr[7];
+    dbgregs.flags = 0;
+
+    return kvm_vcpu_ioctl(CPU(cpu), KVM_SET_DEBUGREGS, &dbgregs);
 }
 
 static int kvm_get_debugregs(X86CPU *cpu)

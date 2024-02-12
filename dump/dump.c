@@ -26,16 +26,14 @@
 #include "qapi/qmp/qerror.h"
 #include "qemu/error-report.h"
 #include "qemu/main-loop.h"
+#include "migration/blocker.h"
 #include "hw/misc/vmcoreinfo.h"
+#include "hw/core/cpu.h"
+#include "win_dump.h"
 
 #ifdef QEMU_NYX
 #include "nyx/state/state.h"
 #endif
-
-#ifdef TARGET_X86_64
-#include "migration/blocker.h"
-#include "hw/core/cpu.h"
-#include "win_dump.h"
 
 #include <zlib.h>
 #ifdef CONFIG_LZO

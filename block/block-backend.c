@@ -1579,13 +1579,6 @@ static const AIOCBInfo blk_aio_em_aiocb_info = {
 #ifndef QEMU_NYX
 static void blk_aio_complete(BlkAioEmAIOCB *acb)
 #else
-void blk_aio_complete(BlkAioEmAIOCB *acb);
-BlockAIOCB *blk_aio_prwv(BlockBackend *blk, int64_t offset, int bytes,
-                                void *iobuf, CoroutineEntry co_entry,
-                                BdrvRequestFlags flags,
-                                BlockCompletionFunc *cb, void *opaque);
-void blk_aio_write_entry(void *opaque);
-
 void blk_aio_complete(BlkAioEmAIOCB *acb)
 #endif
 {
@@ -1604,12 +1597,12 @@ static void blk_aio_complete_bh(void *opaque)
 }
 
 #ifndef QEMU_NYX
-static BlockAIOCB *blk_aio_prwv(BlockBackend *blk, int64_t offset, int64 bytes,
+static BlockAIOCB *blk_aio_prwv(BlockBackend *blk, int64_t offset, int64_t bytes,
                                 void *iobuf, CoroutineEntry co_entry,
                                 BdrvRequestFlags flags,
                                 BlockCompletionFunc *cb, void *opaque)
 #else
-BlockAIOCB *blk_aio_prwv(BlockBackend *blk, int64_t offset, int64 bytes,
+BlockAIOCB *blk_aio_prwv(BlockBackend *blk, int64_t offset, int64_t bytes,
                                 void *iobuf, CoroutineEntry co_entry,
                                 BdrvRequestFlags flags,
                                 BlockCompletionFunc *cb, void *opaque)

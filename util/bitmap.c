@@ -346,7 +346,7 @@ bool bitmap_test_atomic(unsigned long *map, long start, long nr)
 
     /* First word */
     if (nr - bits_to_clear > 0) {
-        old_bits = atomic_fetch_and(p, ULONG_MAX);
+        old_bits = qatomic_fetch_and(p, ULONG_MAX);
         dirty |= old_bits & mask_to_clear;
         nr -= bits_to_clear;
         bits_to_clear = BITS_PER_LONG;
@@ -358,7 +358,7 @@ bool bitmap_test_atomic(unsigned long *map, long start, long nr)
     if (bits_to_clear == BITS_PER_LONG) {
         while (nr >= BITS_PER_LONG) {
             if (*p) {
-                old_bits = atomic_xchg(p, 0);
+                old_bits = qatomic_xchg(p, 0);
                 dirty |= old_bits;
             }
             nr -= BITS_PER_LONG;
@@ -369,7 +369,7 @@ bool bitmap_test_atomic(unsigned long *map, long start, long nr)
     /* Last word */
     if (nr) {
         mask_to_clear &= BITMAP_LAST_WORD_MASK(size);
-        old_bits = atomic_fetch_and(p, ULONG_MAX);
+        old_bits = qatomic_fetch_and(p, ULONG_MAX);
         dirty |= old_bits & mask_to_clear;
     } else {
         if (!dirty) {

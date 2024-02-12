@@ -8,7 +8,7 @@
 #include "qapi/error.h"
 #include "qapi/qapi-types-run-state.h"
 #include "qemu/main-loop.h"
-#include "qemu-common.h"
+#include "qemu-main.h"
 
 #include "sysemu/kvm.h"
 #include "sysemu/kvm_int.h"

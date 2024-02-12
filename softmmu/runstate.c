@@ -61,6 +61,20 @@
 #include "sysemu/tpm.h"
 #include "trace.h"
 
+#ifdef QEMU_NYX
+// clang-format on
+#include "nyx/debug.h"
+#include "nyx/fast_vm_reload_sync.h"
+#include "nyx/helpers.h"
+#include "nyx/hypercall/hypercall.h"
+#include "nyx/interface.h"
+#include "nyx/pt.h"
+#include "nyx/snapshot/memory/backend/nyx_dirty_ring.h"
+#include "nyx/state/state.h"
+#include "nyx/synchronization.h"
+// clang-format off
+#endif
+
 static NotifierList exit_notifiers =
     NOTIFIER_LIST_INITIALIZER(exit_notifiers);
 
@@ -343,11 +357,6 @@ void vm_state_notify(bool running, RunState state)
     }
 }
 
-#ifdef QEMU_NYX
-// clang-format on
-char *loadvm_global = NULL;
-// clang-format off
-#endif
 
 static ShutdownCause reset_requested;
 static ShutdownCause shutdown_requested;

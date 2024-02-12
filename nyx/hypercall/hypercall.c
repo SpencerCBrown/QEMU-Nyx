@@ -23,7 +23,7 @@ along with QEMU-PT.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "exec/memory.h"
 #include "qemu/main-loop.h"
-#include "qemu-common.h"
+#include "qemu-main.h"
 #include <linux/kvm.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
@@ -33,6 +33,10 @@ along with QEMU-PT.  If not, see <http://www.gnu.org/licenses/>.
 #include "sysemu/kvm.h"
 #include "sysemu/kvm_int.h"
 #include "sysemu/runstate.h"
+
+#include "hw/core/cpu.h"
+
+// #include "hw/i386/cpu.h"
 
 
 #include "sysemu/runstate.h"

@@ -1,6 +1,6 @@
 #include "patcher.h"
 #include "debug.h"
-#include "nyx/disassembler.h"
+#include "disassembler.h"
 #include "nyx/memory_access.h"
 #include "nyx/state/state.h"
 

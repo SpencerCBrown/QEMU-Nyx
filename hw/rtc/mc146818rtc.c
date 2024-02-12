@@ -79,7 +79,7 @@ void enable_fast_snapshot_rtc(void){
 }
 #endif
 
-static inline bool rtc_running(RTCState *s)
+static inline bool rtc_running(MC146818RtcState *s);
 static void rtc_set_time(MC146818RtcState *s);
 static void rtc_update_time(MC146818RtcState *s);
 static void rtc_set_cmos(MC146818RtcState *s, const struct tm *tm);

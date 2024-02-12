@@ -1,5 +1,10 @@
 #pragma once
 
+#ifdef PAGE_SIZE
+#undef PAGE_SIZE
+#endif
+#define PAGE_SIZE qemu_real_host_page_size()
+
 uint64_t get_rip(CPUState *cpu);
 
 typedef struct nyx_coverage_bitmap_copy_s {

@@ -2244,11 +2244,13 @@ struct kvm_hyperv_eventfd {
  * size of the gfn buffer is decided by the first argument when
  * enabling KVM_CAP_DIRTY_LOG_RING.
  */
+#ifndef QEMU_NYX
 struct kvm_dirty_gfn {
 	__u32 flags;
 	__u32 slot;
 	__u64 offset;
 };
+#endif
 
 #define KVM_BUS_LOCK_DETECTION_OFF             (1 << 0)
 #define KVM_BUS_LOCK_DETECTION_EXIT            (1 << 1)

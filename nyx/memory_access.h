@@ -23,7 +23,7 @@ along with QEMU-PT.  If not, see <http://www.gnu.org/licenses/>.
 #define MEMORY_ACCESS_H
 
 #include "sysemu/kvm_int.h"
-#include "qemu-common.h"
+#include "qemu-main.h"
 #include "nyx/types.h"
 #include <linux/kvm.h>
 

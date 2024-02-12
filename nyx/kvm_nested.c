@@ -4,7 +4,7 @@
 
 #include "exec/ram_addr.h"
 #include "qemu/rcu_queue.h"
-#include "qemu-common.h"
+#include "qemu-main.h"
 #include "cpu.h"
 #include "nyx/debug.h"
 #include "nyx/kvm_nested.h"

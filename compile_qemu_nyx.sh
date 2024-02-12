@@ -54,7 +54,7 @@ compile_libraries()
 configure_qemu()
 {
   QEMU_CONFIGURE="./configure --target-list=x86_64-softmmu --disable-docs --disable-gtk --disable-werror --disable-capstone --disable-libssh --disable-tools"
-
+  echo "made it here"
   case $1 in
     "debug_static"|"static"|"full_static"|"lto")
       export LIBS="-L$CAPSTONE_ROOT -L$LIBXDC_ROOT/ $LIBS"
@@ -91,7 +91,6 @@ configure_qemu()
 
 compile_qemu()
 {
-  test -f GNUmakefile && rm GNUmakefile 2> /dev/null
   make -j $(nproc)
 }
 
@@ -117,7 +116,6 @@ if [ -z "$LIBXDC_ROOT" -o -z "$CAPSTONE_ROOT" ]; then
 	CAPSTONE_ROOT="$PWD/capstone_v4"
 fi
 
-make clean
 compile_libraries $1
 configure_qemu $1
 compile_qemu

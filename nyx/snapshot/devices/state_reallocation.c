@@ -32,6 +32,7 @@ along with QEMU-PT.  If not, see <http://www.gnu.org/licenses/>.
 #include "nyx/debug.h"
 #include "nyx/snapshot/devices/nyx_device_state.h"
 #include "nyx/snapshot/devices/state_reallocation.h"
+#include "nyx/snapshot/devices/nyx_qio_buffer.h"
 
 // #define VERBOSE_DEBUG
 
@@ -126,7 +127,7 @@ static int fdl_vmstate_load_state(state_reallocation_t     *self,
 static inline VMStateDescription *fdl_vmstate_get_subsection(VMStateDescription **sub,
                                                              char *idstr)
 {
-    while (sub && *sub && (*sub)->needed) {
+    while (sub && *sub) {
         if (strcmp(idstr, (*sub)->name) == 0) {
             return *sub;
         }
@@ -295,10 +296,10 @@ static ssize_t fast_loadvm_get_buffer(void *opaque, uint8_t *buf, int64_t pos, s
     return size;
 }
 
-static const QEMUFileOps fast_loadvm_ops = {
-    .get_buffer = (QEMUFileGetBufferFunc *)fast_loadvm_get_buffer,
-    .close      = (QEMUFileCloseFunc *)fast_loadvm_fclose
-};
+// static const QEMUFileOps fast_loadvm_ops = {
+//     .get_buffer = (QEMUFileGetBufferFunc *)fast_loadvm_get_buffer,
+//     .close      = (QEMUFileCloseFunc *)fast_loadvm_fclose
+// };
 
 /* use opaque data to bootstrap virtio restore from QEMUFile */
 static void fast_virtio_device_get(void *data, size_t size, void *opaque)
@@ -309,7 +310,8 @@ static void fast_virtio_device_get(void *data, size_t size, void *opaque)
         .f      = NULL,
         .pos    = 0,
     };
-    QEMUFile *f = qemu_fopen_ops(&fast_loadvm_opaque, &fast_loadvm_ops);
+    NYXQIOBuffer *fast_loadvm_backing = nyx_qio_buffer_new(&fast_loadvm_opaque);
+    QEMUFile *f = qemu_file_new_input(fast_loadvm_backing);
 
     virtio_device_get(f, opaque, size, NULL);
 }
@@ -566,19 +568,6 @@ static int fdl_vmstate_load_state(state_reallocation_t     *self,
     uint64_t total_size = 0;
 
     if (version_id > vmsd->version_id) {
-        return -EINVAL;
-    }
-    if (version_id < vmsd->minimum_version_id) {
-#ifdef VERBOSE_DEBUG
-        nyx_debug("OLD LOAD\n");
-#endif
-
-        if (vmsd->load_state_old && version_id >= vmsd->minimum_version_id_old) {
-            nyx_debug("OLDSTATE\n");
-            assert(0);
-            ret = vmsd->load_state_old(f, opaque, version_id);
-            return ret;
-        }
         return -EINVAL;
     }
     if (vmsd->pre_load) {

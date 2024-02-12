@@ -209,6 +209,14 @@ static int default_sdcard = 1;
 static int default_vga = 1;
 static int default_net = 1;
 
+#ifdef QEMU_NYX
+// clang-format on
+bool fast_vm_reload = false;
+const char *fast_vm_reload_opt_arg = NULL;
+char *loadvm_global = NULL;
+// clang-format off
+#endif
+
 static struct {
     const char *driver;
     int *flag;
@@ -2585,20 +2593,12 @@ static void qemu_maybe_daemonize(const char *pid_file)
 static void qemu_init_displays(void)
 {
 
-#ifdef QEMU_NYX
-    // clang-format on
-    bool fast_vm_reload = false;
-    state_init_global();
-    const char *fast_vm_reload_opt_arg = NULL;
-// clang-format off
-#endif
-
-    int i;
-    int snapshot, linux_boot;
-    const char *initrd_filename;
-    const char *kernel_filename, *kernel_cmdline;
-    const char *boot_order = NULL;
-    const char *boot_once = NULL;
+    // int i;
+    // int snapshot, linux_boot;
+    // const char *initrd_filename;
+    // const char *kernel_filename, *kernel_cmdline;
+    // const char *boot_order = NULL;
+    // const char *boot_once = NULL;
     DisplayState *ds;
 
     /* init local displays */
@@ -2874,6 +2874,12 @@ void qemu_init(int argc, char **argv)
     MachineClass *machine_class;
     bool userconfig = true;
     FILE *vmstate_dump_file = NULL;
+
+    #ifdef QEMU_NYX
+// clang-format on
+    state_init_global();
+// clang-format off
+    #endif
 
     qemu_add_opts(&qemu_drive_opts);
     qemu_add_drive_opts(&qemu_legacy_drive_opts);

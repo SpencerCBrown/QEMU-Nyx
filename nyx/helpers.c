@@ -11,7 +11,7 @@
 #include "qemu/main-loop.h"
 #include "sysemu/kvm.h"
 #include "sysemu/kvm_int.h"
-#include "qemu-common.h"
+#include "qemu-main.h"
 
 #include "nyx/debug.h"
 #include "nyx/helpers.h"

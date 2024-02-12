@@ -19,6 +19,11 @@
 /* DO NOT ADD ANYTHING IN HERE. USE ONE OF THE HEADERS INCLUDED ABOVE */
 
 #ifdef QEMU_NYX
+#include "nyx/snapshot/block/block_cow.h"
+#include "block/block_int-common.h"
+#endif
+
+#ifdef QEMU_NYX
 struct BlockBackend {
     cow_cache_t* cow_cache;
     char *name;
@@ -61,6 +66,7 @@ struct BlockBackend {
     QLIST_HEAD(, BlockBackendAioNotifier) aio_notifiers;
 
     int quiesce_counter;
+    QemuMutex queued_requests_lock;
     CoQueue queued_requests;
     bool disable_request_queuing;
 

@@ -678,7 +678,7 @@ void fast_get_pci_config_device(void* data, size_t size, void* opaque){
     memcpy(s->config, config, size);
 
     pci_update_mappings(s);
-    if (pc->is_bridge) {
+    if (IS_PCI_BRIDGE(pc)) {
         PCIBridge *b = PCI_BRIDGE(s);
         pci_bridge_update_mappings(b);
     }

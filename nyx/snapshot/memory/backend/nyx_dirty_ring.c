@@ -74,7 +74,7 @@ static void allocate_dirty_ring(int kvm_vcpu, int vm_fd)
     if (dirty_ring_size) {
         kvm_dirty_gfns = mmap(NULL, dirty_ring_size, PROT_READ | PROT_WRITE,
                               MAP_SHARED, kvm_vcpu,
-                              PAGE_SIZE * KVM_DIRTY_LOG_PAGE_OFFSET);
+                              (uint64_t) PAGE_SIZE * KVM_DIRTY_LOG_PAGE_OFFSET);
         if (kvm_dirty_gfns == MAP_FAILED) {
             nyx_abort("Dirty ring mmap failed!\n");
         }

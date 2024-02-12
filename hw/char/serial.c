@@ -344,9 +344,6 @@ static void serial_ioport_write(void *opaque, hwaddr addr, uint64_t val,
         return;
     }
 #endif
-
-    addr &= 7;
-    trace_serial_ioport_write(addr, val);
     assert(size == 1 && addr < 8);
     trace_serial_write(addr, val);
     switch(addr) {

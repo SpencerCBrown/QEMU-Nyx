@@ -23,7 +23,7 @@ along with QEMU-PT.  If not, see <http://www.gnu.org/licenses/>.
 
 #include "monitor/monitor.h"
 #include "sysemu/runstate.h"
-#include "qemu-common.h"
+#include "qemu-main.h"
 
 #include "nyx/snapshot/block/nyx_block_snapshot.h"
 #include "nyx/snapshot/devices/nyx_device_state.h"
